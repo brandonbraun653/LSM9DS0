@@ -215,7 +215,7 @@ namespace LSM9DS0
       float mag;
     } resolution;
 
-    Chimera::Modules::IMU::fMeas9DOF bias;
+    Chimera::Modules::IMU::Measurement9DOF<float> bias;
 
     AccelerometerAntiAliasFilterBandwidth aaFilterBW;
 

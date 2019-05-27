@@ -1,0 +1,19 @@
+
+# ====================================================
+# Local Rules 
+# ====================================================
+local rule explicit_alias ( name : sources * : requirements * : default-build * : usage-requirements * )
+    {
+    alias $(name) : $(sources) : $(requirements) : $(default-build) : $(usage-requirements) ;
+    explicit $(name) ;
+    }
+
+# ====================================================
+# Project Definition
+# ====================================================
+project LSM9DS0Driver : usage-requirements <include>. ;
+
+# ====================================================
+# Public Library Components
+# ====================================================
+explicit_alias PUB : : : : <include>. ;
