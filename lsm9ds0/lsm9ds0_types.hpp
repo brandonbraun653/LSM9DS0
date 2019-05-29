@@ -154,7 +154,7 @@ namespace LSM9DS0
     A_ODR_400    = 0x08, /**< 400 Hz */
     A_ODR_800    = 0x09, /**< 800 Hz */
     A_ODR_1600   = 0x0A  /**< 1600 Hz */
-  } accel_odr;
+  };
 
   enum GyroscopeOutputDataRate : uint8_t
   {                         /**< ODR (Hz) --- Cutoff*/
@@ -217,7 +217,7 @@ namespace LSM9DS0
 
     Chimera::Modules::IMU::Measurement9DOF<float> bias;
 
-    AccelerometerAntiAliasFilterBandwidth aaFilterBW;
+    uint8_t aaFilterBW;
 
     uint8_t xmAddress = 0x1D;
     uint8_t gAddress  = 0x6B;

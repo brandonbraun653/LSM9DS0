@@ -94,15 +94,15 @@ namespace LSM9DS0
 
 
       init_gyro();
-      setODR( Sensor_t::GYRO, settings.odr.gyro );
+      setODR( Sensor_t::GYRO, settings.outputDataRate.gyro );
       setScaling( Sensor_t::GYRO, settings.scale.gyro );
 
       init_accel();
-      setODR( Sensor_t::ACCEL, settings.odr. Sensor_t::ACCEL );
-      setScaling( Sensor_t::ACCEL, settings.scale. Sensor_t::ACCEL );
+      setODR( Sensor_t::ACCEL, settings.outputDataRate.accel );
+      setScaling( Sensor_t::ACCEL, settings.scale.accel );
 
       init_mag();
-      setODR( Sensor_t::MAG, settings.odr.mag );
+      setODR( Sensor_t::MAG, settings.outputDataRate.mag );
       setScaling( Sensor_t::MAG, settings.scale.mag );
       
     }
@@ -161,9 +161,9 @@ namespace LSM9DS0
       _gyro_bias[ 2 ] /= samples;
 
       // Properly scale the data to get deg/s
-      settings.bias.gyro.x = ( float )_gyro_bias[ 0 ] * settings.res.gyro;
-      settings.bias.gyro.y = ( float )_gyro_bias[ 1 ] * settings.res.gyro;
-      settings.bias.gyro.z = ( float )_gyro_bias[ 2 ] * settings.res.gyro;
+      settings.bias.sensor1.x = ( float )_gyro_bias[ 0 ] * settings.resolution.gyro;
+      settings.bias.sensor1.y = ( float )_gyro_bias[ 1 ] * settings.resolution.gyro;
+      settings.bias.sensor1.z = ( float )_gyro_bias[ 2 ] * settings.resolution.gyro;
 
       // Grab the current register settings
       cmd_pkt[ 0 ] = CTRL_REG5_G | LSM_READ_BIT;
@@ -219,7 +219,7 @@ namespace LSM9DS0
         _accel_bias[ 0 ] += ( ( ( int16_t )rcv_pkt[ 2 ] << 8 ) | rcv_pkt[ 1 ] );
         _accel_bias[ 1 ] += ( ( ( int16_t )rcv_pkt[ 4 ] << 8 ) | rcv_pkt[ 3 ] );
         _accel_bias[ 2 ] += ( ( ( int16_t )rcv_pkt[ 6 ] << 8 ) | rcv_pkt[ 5 ] ) -
-                            ( int16_t )( 1.0f / settings.res. Sensor_t::ACCEL );    // Assumes sensor facing up!
+                            ( int16_t )( 1.0f / settings.resolution.accel );    // Assumes sensor facing up!
       }
 
       // average the data
@@ -228,9 +228,9 @@ namespace LSM9DS0
       _accel_bias[ 2 ] /= samples;
 
       // Properly scale data to get gs
-      settings.bias. Sensor_t::ACCEL.x = ( float )_accel_bias[ 0 ] * settings.res. Sensor_t::ACCEL;
-      settings.bias. Sensor_t::ACCEL.y = ( float )_accel_bias[ 1 ] * settings.res. Sensor_t::ACCEL;
-      settings.bias. Sensor_t::ACCEL.z = ( float )_accel_bias[ 2 ] * settings.res. Sensor_t::ACCEL;
+      settings.bias.sensor0.x = ( float )_accel_bias[ 0 ] * settings.resolution.accel;
+      settings.bias.sensor0.y = ( float )_accel_bias[ 1 ] * settings.resolution.accel;
+      settings.bias.sensor0.z = ( float )_accel_bias[ 2 ] * settings.resolution.accel;
 
       // Grab the current register settings
       cmd_pkt[ 0 ] = CTRL_REG0_XM | LSM_READ_BIT;
@@ -314,178 +314,194 @@ namespace LSM9DS0
 
   Chimera::Status_t Driver::setScaling( const Chimera::Modules::IMU::Sensor_t sensor, const uint8_t value )
   {
-    void Driver::setScale_gyro( Sensor_t::GYRO_scale gScl )
-  {
+    using namespace Chimera::Modules::IMU;
+    
+    Chimera::Status_t result = Chimera::CommonStatusCodes::OK;
+
     cmd_pkt.fill( 0 );
     rcv_pkt.fill( 0 );
+    
+    switch ( sensor )
+    {
+      case Sensor_t::ACCEL:
+        // We need to preserve the other bytes in CTRL_REG2_XM. So, first read it:
+        cmd_pkt[ 0 ] = CTRL_REG2_XM | LSM_READ_BIT;    // Ensure we ask for a read
+        read_pkt(  Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 2 );
 
-    // We need to preserve the other bytes in CTRL_REG4_G. So, first read it:
-    cmd_pkt[ 0 ] = CTRL_REG4_G | LSM_READ_BIT;    // Ensure we ask for a read
-    read_pkt( Sensor_t::GYRO, cmd_pkt, rcv_pkt, 2 );
+        // Then mask out the  Sensor_t::ACCEL scale bits and shift in new scale bits:
+        rcv_pkt[ 1 ] &= 0xFF ^ ( 0x3 << 3 );
+        rcv_pkt[ 1 ] |= value << 3;
 
-    // Then mask out the Sensor_t::GYRO scale bits and shift in new scale bits:
-    rcv_pkt[ 1 ] &= 0xFF ^ ( 0x3 << 4 );
-    rcv_pkt[ 1 ] |= gScl << 4;
+        // And write the new register value back into CTRL_REG2_XM:
+        cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
+        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
+        write_pkt(  Sensor_t::ACCEL, cmd_pkt.data(), 2 );
 
-    // And write the new register value back into CTRL_REG4_G:
-    cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
-    cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-    write_pkt( Sensor_t::GYRO, cmd_pkt, 2 );
+        // Update class variable and calculate a new resolution
+        settings.scale.accel = static_cast<AccelerometerScale>( value );
+        calc_aRes();
+        break;
+        
+      case Sensor_t::GYRO:
+        // We need to preserve the other bytes in CTRL_REG4_G. So, first read it:
+        cmd_pkt[ 0 ] = CTRL_REG4_G | LSM_READ_BIT;    // Ensure we ask for a read
+        read_pkt( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), 2 );
 
-    // Update class variables and calculate a new resolution
-    settings.scale.gyro = gScl;
-    calc_gRes();
-  }
+        // Then mask out the Sensor_t::GYRO scale bits and shift in new scale bits:
+        rcv_pkt[ 1 ] &= 0xFF ^ ( 0x3 << 4 );
+        rcv_pkt[ 1 ] |= value << 4;
 
-  void Driver::setScale_ Sensor_t::ACCEL(  Sensor_t::ACCEL_scale aScl )
-  {
-    cmd_pkt.fill( 0 );
-    rcv_pkt.fill( 0 );
+        // And write the new register value back into CTRL_REG4_G:
+        cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
+        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
+        write_pkt( Sensor_t::GYRO, cmd_pkt.data(), 2 );
 
-    // We need to preserve the other bytes in CTRL_REG2_XM. So, first read it:
-    cmd_pkt[ 0 ] = CTRL_REG2_XM | LSM_READ_BIT;    // Ensure we ask for a read
-    read_pkt(  Sensor_t::ACCEL, cmd_pkt, rcv_pkt, 2 );
+        // Update class variables and calculate a new resolution
+        settings.scale.gyro = static_cast<GyroscopeScale>(value);
+        calc_gRes();
+        break;
+        
+      case Sensor_t::MAG:
+        // We need to preserve the other bytes in CTRL_REG6_XM. So, first read it:
+        cmd_pkt[ 0 ] = CTRL_REG6_XM | LSM_READ_BIT;    // Ensure we ask for a read
+        read_pkt( Sensor_t::MAG, cmd_pkt.data(), rcv_pkt.data(), 2 );
 
-    // Then mask out the  Sensor_t::ACCEL scale bits and shift in new scale bits:
-    rcv_pkt[ 1 ] &= 0xFF ^ ( 0x3 << 3 );
-    rcv_pkt[ 1 ] |= aScl << 3;
+        // Then mask out the  Sensor_t::ACCEL scale bits and shift in new scale bits:
+        rcv_pkt[ 1 ] &= 0xFF ^ ( 0x3 << 5 );
+        rcv_pkt[ 1 ] |= value << 5;
 
-    // And write the new register value back into CTRL_REG2_XM:
-    cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
-    cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-    write_pkt(  Sensor_t::ACCEL, cmd_pkt, 2 );
+        // And write the new register value back into CTRL_REG6_XM:
+        cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
+        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
+        write_pkt( Sensor_t::MAG, cmd_pkt.data(), 2 );
 
-    // Update class variable and calculate a new resolution
-    settings.scale. Sensor_t::ACCEL = aScl;
-    calc_aRes();
-  }
+        // Update class variable and calculate a new resolution
+        settings.scale.mag = static_cast<MagnetometerScale>(value);
+        calc_mRes();
+        break;
+        
+      case Sensor_t::TEMP:
+      default:
+        result = Chimera::CommonStatusCodes::FAIL;
+        break;
+    };
 
-  void Driver::setScale_mag( mag_scale mScl )
-  {
-    cmd_pkt.fill( 0 );
-    rcv_pkt.fill( 0 );
-
-    // We need to preserve the other bytes in CTRL_REG6_XM. So, first read it:
-    cmd_pkt[ 0 ] = CTRL_REG6_XM | LSM_READ_BIT;    // Ensure we ask for a read
-    read_pkt( MAG, cmd_pkt, rcv_pkt, 2 );
-
-    // Then mask out the  Sensor_t::ACCEL scale bits and shift in new scale bits:
-    rcv_pkt[ 1 ] &= 0xFF ^ ( 0x3 << 5 );
-    rcv_pkt[ 1 ] |= mScl << 5;
-
-    // And write the new register value back into CTRL_REG6_XM:
-    cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
-    cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-    write_pkt( MAG, cmd_pkt, 2 );
-
-    // Update class variable and calculate a new resolution
-    settings.scale.mag = mScl;
-    calc_mRes();
-  }
+    return result;
   }
 
   Chimera::Status_t Driver::setODR( const Chimera::Modules::IMU::Sensor_t sensor, const uint8_t value )
   {
-    void Driver::setODR_gyro( Sensor_t::GYRO_odr gODR )
-  {
+    using namespace Chimera::Modules::IMU;
+    
+    Chimera::Status_t result = Chimera::CommonStatusCodes::OK;
+
     cmd_pkt.fill( 0 );
     rcv_pkt.fill( 0 );
+    
+    switch ( sensor )
+    {
+      case Sensor_t::ACCEL:
+        // We need to preserve the other bytes in CTRL_REG1_XM. So, first read it:
+        cmd_pkt[ 0 ] = CTRL_REG1_XM | LSM_READ_BIT;    // Ensure we ask for a read
+        read_pkt(  Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 2 );
 
-    // We need to preserve the other bytes in CTRL_REG1_G. So, first read it:
-    cmd_pkt[ 0 ] = CTRL_REG1_G | LSM_READ_BIT;    // Ensure we ask for a read
-    read_pkt( Sensor_t::GYRO, cmd_pkt, rcv_pkt, 2 );
+        // Then mask out the  Sensor_t::ACCEL ODR bits:
+        rcv_pkt[ 1 ] &= 0xFF ^ ( 0xF << 4 );
+        rcv_pkt[ 1 ] |= ( value << 4 );
 
-    // Then mask out the Sensor_t::GYRO ODR bits:
-    rcv_pkt[ 1 ] &= 0xFF ^ ( 0xF << 4 );
-    rcv_pkt[ 1 ] |= ( gODR << 4 );
+        // And write the new register value back into CTRL_REG1_XM:
+        cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
+        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
+        write_pkt(  Sensor_t::ACCEL, cmd_pkt.data(), 2 );
 
-    // And write the new register value back into CTRL_REG1_G:
-    cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
-    cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-    write_pkt( Sensor_t::GYRO, cmd_pkt, 2 );
+        // Update class variable
+        settings.outputDataRate.accel = static_cast<AccelerometerOuputDataRate>( value );
+        break;
+        
+      case Sensor_t::GYRO:
+        // We need to preserve the other bytes in CTRL_REG1_G. So, first read it:
+        cmd_pkt[ 0 ] = CTRL_REG1_G | LSM_READ_BIT;    // Ensure we ask for a read
+        read_pkt( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), 2 );
 
-    // Update class variable
-    settings.odr.gyro = gODR;
-  }
+        // Then mask out the Sensor_t::GYRO ODR bits:
+        rcv_pkt[ 1 ] &= 0xFF ^ ( 0xF << 4 );
+        rcv_pkt[ 1 ] |= ( value << 4 );
 
-  void Driver::setODR_ Sensor_t::ACCEL(  Sensor_t::ACCEL_odr aODR )
-  {
-    cmd_pkt.fill( 0 );
-    rcv_pkt.fill( 0 );
+        // And write the new register value back into CTRL_REG1_G:
+        cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
+        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
+        write_pkt( Sensor_t::GYRO, cmd_pkt.data(), 2 );
 
-    // We need to preserve the other bytes in CTRL_REG1_XM. So, first read it:
-    cmd_pkt[ 0 ] = CTRL_REG1_XM | LSM_READ_BIT;    // Ensure we ask for a read
-    read_pkt(  Sensor_t::ACCEL, cmd_pkt, rcv_pkt, 2 );
+        // Update class variable
+        settings.outputDataRate.gyro = static_cast<GyroscopeOutputDataRate>( value );
+        break;
+        
+      case Sensor_t::MAG:
+        // We need to preserve the other bytes in CTRL_REG5_XM. So, first read it:
+        cmd_pkt[ 0 ] = CTRL_REG5_XM | LSM_READ_BIT;    // Ensure we ask for a read
+        read_pkt( Sensor_t::MAG, cmd_pkt.data(), rcv_pkt.data(), 2 );
 
-    // Then mask out the  Sensor_t::ACCEL ODR bits:
-    rcv_pkt[ 1 ] &= 0xFF ^ ( 0xF << 4 );
-    rcv_pkt[ 1 ] |= ( aODR << 4 );
+        // Then mask out the mag ODR bits:
+        rcv_pkt[ 1 ] &= 0xFF ^ ( 0x7 << 2 );
+        rcv_pkt[ 1 ] |= ( value << 2 );
 
-    // And write the new register value back into CTRL_REG1_XM:
-    cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
-    cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-    write_pkt(  Sensor_t::ACCEL, cmd_pkt, 2 );
+        // And write the new register value back into CTRL_REG5_XM:
+        cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
+        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
+        write_pkt( Sensor_t::MAG, cmd_pkt.data(), 2 );
 
-    // Update class variable
-    settings.odr. Sensor_t::ACCEL = aODR;
-  }
+        // Update class variable
+        settings.outputDataRate.mag = static_cast<MagnetometerOutputDataRate>( value );
+        break;
+        
+      case Sensor_t::TEMP:
+      default:
+        result = Chimera::CommonStatusCodes::FAIL;
+        break;
+    };
 
-  void Driver::setODR_mag( mag_odr mODR )
-  {
-    cmd_pkt.fill( 0 );
-    rcv_pkt.fill( 0 );
-
-    // We need to preserve the other bytes in CTRL_REG5_XM. So, first read it:
-    cmd_pkt[ 0 ] = CTRL_REG5_XM | LSM_READ_BIT;    // Ensure we ask for a read
-    read_pkt( MAG, cmd_pkt, rcv_pkt, 2 );
-
-    // Then mask out the mag ODR bits:
-    rcv_pkt[ 1 ] &= 0xFF ^ ( 0x7 << 2 );
-    rcv_pkt[ 1 ] |= ( mODR << 2 );
-
-    // And write the new register value back into CTRL_REG5_XM:
-    cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
-    cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-    write_pkt( MAG, cmd_pkt, 2 );
-
-    // Update class variable
-    settings.odr.mag = mODR;
-  }
+    return result;
   }
 
   Chimera::Status_t Driver::setABW( const Chimera::Modules::IMU::Sensor_t sensor, const uint8_t value )
   {
-     
-    cmd_pkt.fill( 0 );
-    rcv_pkt.fill( 0 );
+    using namespace Chimera::Modules::IMU;
+    
+    Chimera::Status_t result = Chimera::CommonStatusCodes::FAIL;
 
-    // We need to preserve the other bytes in CTRL_REG2_XM. So, first read it:
-    cmd_pkt[ 0 ] = CTRL_REG2_XM | LSM_READ_BIT;    // Ensure we ask for a read
-    read_pkt(  Sensor_t::ACCEL, cmd_pkt, rcv_pkt, 2 );
+    if ( sensor == Sensor_t::ACCEL )
+    {
+      cmd_pkt.fill( 0 );
+      rcv_pkt.fill( 0 );
 
-    // Then mask out the  Sensor_t::ACCEL ABW bits:
-    rcv_pkt[ 1 ] &= 0xFF ^ ( 0x3 << 7 );
-    rcv_pkt[ 1 ] |= ( aBW << 7 );
+      // We need to preserve the other bytes in CTRL_REG2_XM. So, first read it:
+      cmd_pkt[ 0 ] = CTRL_REG2_XM | LSM_READ_BIT;    // Ensure we ask for a read
+      read_pkt( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 2 );
 
-    // And write the new register value back into CTRL_REG2_XM:
-    cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
-    cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-    write_pkt(  Sensor_t::ACCEL, cmd_pkt, 2 );
+      // Then mask out the  Sensor_t::ACCEL ABW bits:
+      rcv_pkt[ 1 ] &= 0xFF ^ ( 0x3 << 7 );
+      rcv_pkt[ 1 ] |= ( value << 7 );
 
-    // Update class variable
-    settings.abw_ Sensor_t::ACCEL = aBW;
+      // And write the new register value back into CTRL_REG2_XM:
+      cmd_pkt[ 0 ] &= ~LSM_READ_BIT;    // Ensure we are writing
+      cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
+      write_pkt( Sensor_t::ACCEL, cmd_pkt.data(), 2 );
 
+      // Update class variable
+      settings.aaFilterBW = value;
+      result              = Chimera::CommonStatusCodes::OK;
+    }
+
+    return result;
   }
-  
-  
   
   void Driver::calc_aRes()
   {
     // Possible  Sensor_t::ACCELerometer scales (and their register bit settings) are:
     // 2 g (000), 4g (001), 6g (010) 8g (011), 16g (100). Here's a bit of an
     // algorithm to calculate g/(ADC tick) based on that 3-bit value:
-    settings.res. Sensor_t::ACCEL =
-        settings.scale. Sensor_t::ACCEL == A_SCALE_16G ? 16.0f / 32768.0f : ( ( ( float )settings.scale. Sensor_t::ACCEL + 1.0f ) * 2.0f ) / 32768.0f;
+    settings.resolution.accel =
+        settings.scale.accel == A_SCALE_16G ? 16.0f / 32768.0f : ( ( ( float )settings.scale.accel + 1.0f ) * 2.0f ) / 32768.0f;
   }
 
   void Driver::calc_mRes()
@@ -493,7 +509,7 @@ namespace LSM9DS0
     // Possible magnetometer scales (and their register bit settings) are:
     // 2 Gs (00), 4 Gs (01), 8 Gs (10) 12 Gs (11). Here's a bit of an algorithm
     // to calculate Gs/(ADC tick) based on that 2-bit value:
-    settings.res.mag = settings.scale.mag == M_SCALE_2GS ? 2.0f / 32768.0f : ( float )( settings.scale.mag << 2 ) / 32768.0f;
+    settings.resolution.mag = settings.scale.mag == M_SCALE_2GS ? 2.0f / 32768.0f : ( float )( settings.scale.mag << 2 ) / 32768.0f;
   }
 
   void Driver::calc_gRes()
@@ -504,36 +520,36 @@ namespace LSM9DS0
     switch ( settings.scale.gyro )
     {
       case G_SCALE_245DPS:
-        settings.res.gyro = 245.0f / 32768.0f;
+        settings.resolution.gyro = 245.0f / 32768.0f;
         break;
       case G_SCALE_500DPS:
-        settings.res.gyro = 500.0f / 32768.0f;
+        settings.resolution.gyro = 500.0f / 32768.0f;
         break;
       case G_SCALE_2000DPS:
-        settings.res.gyro = 2000.0f / 32768.0f;
+        settings.resolution.gyro = 2000.0f / 32768.0f;
         break;
     }
   }
 
   void Driver::calc_gyro()
   {
-    data.sensor1.x = ( settings.res.gyro * ( float )rawData.sensor1.x );
-    data.sensor1.y = ( settings.res.gyro * ( float )rawData.sensor1.y );
-    data.sensor1.z = ( settings.res.gyro * ( float )rawData.sensor1.z );
+    data.sensor1.x = ( settings.resolution.gyro * ( float )rawData.sensor1.x );
+    data.sensor1.y = ( settings.resolution.gyro * ( float )rawData.sensor1.y );
+    data.sensor1.z = ( settings.resolution.gyro * ( float )rawData.sensor1.z );
   }
 
   void Driver::calc_accel()
   {
-    data.sensor0.x = ( settings.res. Sensor_t::ACCEL * ( float )rawData.sensor0.x * 9.8f );
-    data.sensor0.y = ( settings.res. Sensor_t::ACCEL * ( float )rawData.sensor0.y * 9.8f );
-    data.sensor0.z = ( settings.res. Sensor_t::ACCEL * ( float )rawData.sensor0.z * 9.8f );
+    data.sensor0.x = ( settings.resolution.accel * ( float )rawData.sensor0.x * 9.8f );
+    data.sensor0.y = ( settings.resolution.accel * ( float )rawData.sensor0.y * 9.8f );
+    data.sensor0.z = ( settings.resolution.accel * ( float )rawData.sensor0.z * 9.8f );
   }
 
   void Driver::calc_mag()
   {
-    data.sensor2.x = ( settings.res.mag * ( float )rawData.sensor2.x );
-    data.sensor2.y = ( settings.res.mag * ( float )rawData.sensor2.y );
-    data.sensor2.z = ( settings.res.mag * ( float )rawData.sensor2.z );
+    data.sensor2.x = ( settings.resolution.mag * ( float )rawData.sensor2.x );
+    data.sensor2.y = ( settings.resolution.mag * ( float )rawData.sensor2.y );
+    data.sensor2.z = ( settings.resolution.mag * ( float )rawData.sensor2.z );
   }
 
   void Driver::write_pkt( const Chimera::Modules::IMU::Sensor_t chip, uint8_t *cmd_buffer, size_t length )
