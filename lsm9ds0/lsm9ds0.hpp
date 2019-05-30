@@ -66,8 +66,9 @@ namespace LSM9DS0
     Chimera::Modules::IMU::Measurement9DOF<float> data;
     Chimera::Modules::IMU::Measurement9DOF<int16_t> rawData;
 
-    std::array<uint8_t, 32> cmd_pkt;
-    std::array<uint8_t, 32> rcv_pkt;
+    static constexpr size_t transferPacketSize = 32;
+    std::array<uint8_t, transferPacketSize> cmd_pkt;
+    std::array<uint8_t, transferPacketSize> rcv_pkt;
 
     bool hardwareAttached = false;
     bool settingsAttached = false;

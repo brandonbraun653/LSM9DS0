@@ -17,9 +17,6 @@
 
 namespace LSM9DS0
 {
-  static constexpr uint8_t LSM_READ_BIT      = 1u << 7;
-  static constexpr uint8_t LSM_AUTO_INCR_BIT = 1u << 6;
-
   static constexpr size_t MAX_SPI_CLOCK  = 10000000;
   static constexpr size_t FAST_SPI_CLOCK = 8000000;
   static constexpr size_t MED_SPI_CLOCK  = 4000000;
@@ -28,11 +25,35 @@ namespace LSM9DS0
   /*------------------------------------------------
   LSM9DS0 Gyro Registers
   ------------------------------------------------*/
-  static constexpr uint8_t WHO_AM_I_G      = 0x0F;
-  static constexpr uint8_t CTRL_REG1_G     = 0x20;
-  static constexpr uint8_t CTRL_REG2_G     = 0x21;
-  static constexpr uint8_t CTRL_REG3_G     = 0x22;
-  static constexpr uint8_t CTRL_REG4_G     = 0x23;
+  static constexpr uint8_t WHO_AM_I_G = 0x0F;
+
+  /*-------------------------------------------------
+  Control Register 1 Gyroscope
+    - Output data rate
+    - Output bandwidth
+    - Power down mode enable/disable
+    - Gyroscope XYZ axis sense enable/disable
+  -------------------------------------------------*/
+  static constexpr uint8_t CTRL_REG1_G         = 0x20;
+  static constexpr uint8_t CTRL_REG1_G_ODR_MSK = 0xF0;
+  static constexpr uint8_t CTRL_REG1_G_ODR_POS = 4;
+
+
+  static constexpr uint8_t CTRL_REG2_G = 0x21;
+  static constexpr uint8_t CTRL_REG3_G = 0x22;
+
+  /*-------------------------------------------------
+  Control Register 4 Gyroscope
+    - Block data update enable/disable
+    - Big/little endian data reporting
+    - Full scale selection
+    - Self test enable
+    - SPI interface mode (4-wire vs 3-wire)
+  -------------------------------------------------*/
+  static constexpr uint8_t CTRL_REG4_G         = 0x23;
+  static constexpr uint8_t CTRL_REG4_G_SCL_MSK = 0x30;
+  static constexpr uint8_t CTRL_REG4_G_SCL_POS = 4u;
+
   static constexpr uint8_t CTRL_REG5_G     = 0x24;
   static constexpr uint8_t REFERENCE_G     = 0x25;
   static constexpr uint8_t STATUS_REG_G    = 0x27;
@@ -57,36 +78,80 @@ namespace LSM9DS0
   /*------------------------------------------------
   LSM9DS0 Accelerometer/Magnetometer (XM) Registers
   ------------------------------------------------*/
-  static constexpr uint8_t OUT_TEMP_L_XM      = 0x05;
-  static constexpr uint8_t OUT_TEMP_H_XM      = 0x06;
-  static constexpr uint8_t STATUS_REG_M       = 0x07;
-  static constexpr uint8_t OUT_X_L_M          = 0x08;
-  static constexpr uint8_t OUT_X_H_M          = 0x09;
-  static constexpr uint8_t OUT_Y_L_M          = 0x0A;
-  static constexpr uint8_t OUT_Y_H_M          = 0x0B;
-  static constexpr uint8_t OUT_Z_L_M          = 0x0C;
-  static constexpr uint8_t OUT_Z_H_M          = 0x0D;
-  static constexpr uint8_t WHO_AM_I_XM        = 0x0F;
-  static constexpr uint8_t INT_CTRL_REG_M     = 0x12;
-  static constexpr uint8_t INT_SRC_REG_M      = 0x13;
-  static constexpr uint8_t INT_THS_L_M        = 0x14;
-  static constexpr uint8_t INT_THS_H_M        = 0x15;
-  static constexpr uint8_t OFFSET_X_L_M       = 0x16;
-  static constexpr uint8_t OFFSET_X_H_M       = 0x17;
-  static constexpr uint8_t OFFSET_Y_L_M       = 0x18;
-  static constexpr uint8_t OFFSET_Y_H_M       = 0x19;
-  static constexpr uint8_t OFFSET_Z_L_M       = 0x1A;
-  static constexpr uint8_t OFFSET_Z_H_M       = 0x1B;
-  static constexpr uint8_t REFERENCE_X        = 0x1C;
-  static constexpr uint8_t REFERENCE_Y        = 0x1D;
-  static constexpr uint8_t REFERENCE_Z        = 0x1E;
-  static constexpr uint8_t CTRL_REG0_XM       = 0x1F;
-  static constexpr uint8_t CTRL_REG1_XM       = 0x20;
-  static constexpr uint8_t CTRL_REG2_XM       = 0x21;
-  static constexpr uint8_t CTRL_REG3_XM       = 0x22;
-  static constexpr uint8_t CTRL_REG4_XM       = 0x23;
-  static constexpr uint8_t CTRL_REG5_XM       = 0x24;
-  static constexpr uint8_t CTRL_REG6_XM       = 0x25;
+  static constexpr uint8_t OUT_TEMP_L_XM  = 0x05;
+  static constexpr uint8_t OUT_TEMP_H_XM  = 0x06;
+  static constexpr uint8_t STATUS_REG_M   = 0x07;
+  static constexpr uint8_t OUT_X_L_M      = 0x08;
+  static constexpr uint8_t OUT_X_H_M      = 0x09;
+  static constexpr uint8_t OUT_Y_L_M      = 0x0A;
+  static constexpr uint8_t OUT_Y_H_M      = 0x0B;
+  static constexpr uint8_t OUT_Z_L_M      = 0x0C;
+  static constexpr uint8_t OUT_Z_H_M      = 0x0D;
+  static constexpr uint8_t WHO_AM_I_XM    = 0x0F;
+  static constexpr uint8_t INT_CTRL_REG_M = 0x12;
+  static constexpr uint8_t INT_SRC_REG_M  = 0x13;
+  static constexpr uint8_t INT_THS_L_M    = 0x14;
+  static constexpr uint8_t INT_THS_H_M    = 0x15;
+  static constexpr uint8_t OFFSET_X_L_M   = 0x16;
+  static constexpr uint8_t OFFSET_X_H_M   = 0x17;
+  static constexpr uint8_t OFFSET_Y_L_M   = 0x18;
+  static constexpr uint8_t OFFSET_Y_H_M   = 0x19;
+  static constexpr uint8_t OFFSET_Z_L_M   = 0x1A;
+  static constexpr uint8_t OFFSET_Z_H_M   = 0x1B;
+  static constexpr uint8_t REFERENCE_X    = 0x1C;
+  static constexpr uint8_t REFERENCE_Y    = 0x1D;
+  static constexpr uint8_t REFERENCE_Z    = 0x1E;
+  static constexpr uint8_t CTRL_REG0_XM   = 0x1F;
+
+  /*-------------------------------------------------
+  Control Register 1 Accel/Mag
+    - Accelerometer output data rate
+    - Block data update enable/disable
+    - Accelerometer XYZ axis sense enable/disable
+  -------------------------------------------------*/
+  static constexpr uint8_t CTRL_REG1_XM            = 0x20;
+  static constexpr uint8_t CTRL_REG1_XM_ODR_MSK    = 0xF0;
+  static constexpr uint8_t CTRL_REG1_XM_ODR_POS    = 4u;
+  static constexpr uint8_t CTRL_REG1_XM_XYZ_EN_MSK = 0x07;
+  static constexpr uint8_t CTRL_REG1_XM_AX_EN      = 1u << 0;
+  static constexpr uint8_t CTRL_REG1_XM_AY_EN      = 1u << 1;
+  static constexpr uint8_t CTRL_REG1_XM_AZ_EN      = 1u << 2;
+
+  /*-------------------------------------------------
+  Control Register 2 Accel/Mag
+    - Accelerometer anti-alias filter bandwidth
+    - Acceleration full scale selection
+    - Acceleration self-test enable/disable
+    - SPI transaction mode (4-wire vs 3-wire)
+  -------------------------------------------------*/
+  static constexpr uint8_t CTRL_REG2_XM         = 0x21;
+  static constexpr uint8_t CTRL_REG2_XM_ABW_MSK = 0xC0;
+  static constexpr uint8_t CTRL_REG2_XM_ABW_POS = 6u;
+  static constexpr uint8_t CTRL_REG2_XM_SCL_MSK = 0x38;
+  static constexpr uint8_t CTRL_REG2_XM_SCL_POS = 3u;
+
+  static constexpr uint8_t CTRL_REG3_XM = 0x22;
+  static constexpr uint8_t CTRL_REG4_XM = 0x23;
+
+  /*-------------------------------------------------
+  Control Register 5 Accel/Mag
+    - Temperature sensor enable/disable
+    - Magnetic resolution
+    - Magnetic data rate
+    - Latch interrupt request status
+  -------------------------------------------------*/
+  static constexpr uint8_t CTRL_REG5_XM         = 0x24;
+  static constexpr uint8_t CTRL_REG5_XM_ODR_MSK = 0x07;
+  static constexpr uint8_t CTRL_REG5_XM_ODR_POS = 2u;
+
+  /*-------------------------------------------------
+  Control Register 6 Accel/Mag
+    - Magnetometer full scale selection
+  -------------------------------------------------*/
+  static constexpr uint8_t CTRL_REG6_XM         = 0x25;
+  static constexpr uint8_t CTRL_REG6_XM_SCL_MSK = 0x60;
+  static constexpr uint8_t CTRL_REG6_XM_SCL_POS = 5u;
+
   static constexpr uint8_t CTRL_REG7_XM       = 0x26;
   static constexpr uint8_t STATUS_REG_A       = 0x27;
   static constexpr uint8_t OUT_X_L_A          = 0x28;
