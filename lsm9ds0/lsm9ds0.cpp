@@ -21,7 +21,7 @@
 namespace LSM9DS0
 {
   static constexpr uint8_t LSM_READ_BIT      = 1u << 7;
-  static constexpr uint8_t LSM_WRITE_BIT     = ~LSM_READ_BIT;
+  static constexpr uint8_t LSM_WRITE_BIT     = static_cast<uint8_t>( ~LSM_READ_BIT );
   static constexpr uint8_t LSM_AUTO_INCR_BIT = 1u << 6;
 
   Driver::Driver() : hardwareAttached( false ), settingsAttached( false )
