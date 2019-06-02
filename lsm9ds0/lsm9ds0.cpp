@@ -13,6 +13,8 @@
 
 /* Chimera Includes */
 #include <Chimera/chimera.hpp>
+#include <Chimera/constants/physics.hpp>
+#include <Chimera/constants/units.hpp>
 
 /* Driver Includes */
 #include <lsm9ds0/lsm9ds0.hpp>
@@ -23,8 +25,10 @@ namespace LSM9DS0
   static constexpr uint8_t LSM_READ_BIT      = 1u << 7;
   static constexpr uint8_t LSM_WRITE_BIT     = static_cast<uint8_t>( ~LSM_READ_BIT );
   static constexpr uint8_t LSM_AUTO_INCR_BIT = 1u << 6;
+  static constexpr size_t IMU_READ_LEN  = 7;
+  static constexpr size_t TEMP_READ_LEN = 3;
 
-  Driver::Driver() : hardwareAttached( false ), settingsAttached( false )
+  Driver::Driver() : spiDriverAttached( false ), chipSelectsAttached( false ), imuSettingsAttached( false )
   {
   }
 
@@ -42,7 +46,7 @@ namespace LSM9DS0
     Chimera::Status_t result = Chimera::CommonStatusCodes::OK;
     bool sensorPresent       = true;
 
-    if ( !hardwareAttached || !settingsAttached )
+    if ( !spiDriverAttached || !chipSelectsAttached || !imuSettingsAttached )
     {
       result = Chimera::CommonStatusCodes::NOT_INITIALIZED;
     }
@@ -59,28 +63,16 @@ namespace LSM9DS0
       gyroCS->setMode( Drive::OUTPUT_PUSH_PULL, true );
       gyroCS->setState( State::HIGH );
 
-      setup.mode      = Mode::MASTER;
-      setup.bitOrder  = BitOrder::MSB_FIRST;
-      setup.dataSize  = DataSize::SZ_8BIT;
-      setup.clockMode = ClockMode::MODE0;
-
-      if ( setup.clockFrequency > MAX_SPI_CLOCK )
-      {
-        setup.clockFrequency = SLOW_SPI_CLOCK;
-      }
-
-      spi->init( setup );
       spi->setChipSelectControlMode( ChipSelectMode::MANUAL );
       spi->setPeripheralMode( SubPeripheral::TXRX, setup.transferMode );
+      
+      
+      reset();
 
       /*------------------------------------------------
-      Attempt to find the Sensor_t::GYROscope sensor
+      Attempt to find the gyroscope sensor
       ------------------------------------------------*/
-      cmd_pkt.fill( 0 );
-      cmd_pkt[ 0 ] = WHO_AM_I_G | LSM_READ_BIT;
-      read_pkt( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), 2 );
-
-      if ( rcv_pkt[ 1 ] != 0xD4 )
+      if ( readRegister( Sensor_t::GYRO, WHO_AM_I_G ) != 0xD4 )
       {
         sensorPresent = false;
         result        = Chimera::CommonStatusCodes::FAIL;
@@ -89,181 +81,160 @@ namespace LSM9DS0
       /*------------------------------------------------
       Attempt to find the accelerometer/magnetometer sensor
       ------------------------------------------------*/
-      cmd_pkt[ 0 ] = WHO_AM_I_XM | LSM_READ_BIT;
-      read_pkt( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 2 );
-
-      if ( rcv_pkt[ 1 ] != 0x49 )
+      if ( readRegister( Sensor_t::ACCEL, WHO_AM_I_XM ) != 0x49 )
       {
         sensorPresent = false;
         result        = Chimera::CommonStatusCodes::FAIL;
       }
+
+      /*------------------------------------------------
+      Initialize everything properly
+      ------------------------------------------------*/
+      Chimera::Status_t initFailDetect = Chimera::CommonStatusCodes::OK;
+
+      initAccel();
+      initFailDetect |= setODR( Sensor_t::ACCEL, settings.outputDataRate.accel );
+      initFailDetect |= setScaling( Sensor_t::ACCEL, settings.scale.accel );
+      updateAccelResolution();
       
-      calc_gRes();    // Calculate DPS / ADC tick
-      calc_mRes();    // Calculate  Gs / ADC tick
-      calc_aRes();    // Calculate   g / ADC tick
+      initGyro();
+      initFailDetect |= setODR( Sensor_t::GYRO, settings.outputDataRate.gyro );
+      initFailDetect |= setScaling( Sensor_t::GYRO, settings.scale.gyro );
+      updateGyroResolution();
 
-      init_gyro();
-      setODR( Sensor_t::GYRO, settings.outputDataRate.gyro );
-      setScaling( Sensor_t::GYRO, settings.scale.gyro );
+      initMag();
+      initFailDetect |= setODR( Sensor_t::MAG, settings.outputDataRate.mag );
+      initFailDetect |= setScaling( Sensor_t::MAG, settings.scale.mag );
+      updateMagResolution();
 
-      init_accel();
-      setODR( Sensor_t::ACCEL, settings.outputDataRate.accel );
-      setScaling( Sensor_t::ACCEL, settings.scale.accel );
-
-      init_mag();
-      setODR( Sensor_t::MAG, settings.outputDataRate.mag );
-      setScaling( Sensor_t::MAG, settings.scale.mag );
+      if ( initFailDetect != Chimera::CommonStatusCodes::OK )
+      {
+        result = Chimera::CommonStatusCodes::FAIL;
+      }
     }
 
     return result;
   }
 
+  Chimera::Status_t Driver::attachSPI( const Chimera::SPI::SPIClass_sPtr &spi, Chimera::SPI::Setup &setup )
+  {
+    using namespace Chimera::SPI;
+    
+    Chimera::Status_t result = Chimera::CommonStatusCodes::OK;
+
+    setup.mode      = Mode::MASTER;
+    setup.bitOrder  = BitOrder::MSB_FIRST;
+    setup.dataSize  = DataSize::SZ_8BIT;
+    setup.clockMode = ClockMode::MODE0;
+
+    if ( setup.clockFrequency > MAX_SPI_CLOCK )
+    {
+      setup.clockFrequency = SLOW_SPI_CLOCK;
+    }
+
+    if ( spi->init( setup ) != Chimera::CommonStatusCodes::OK )
+    {
+      result = Chimera::CommonStatusCodes::FAIL;
+    }
+    else
+    {
+      this->spi = spi;
+      spiDriverAttached = true;
+    }
+
+    return result;
+  }
+
+  Chimera::Status_t Driver::attachCS( const Chimera::GPIO::GPIOClass_sPtr &accelMagCS,
+                                      const Chimera::GPIO::PinInit &accelMagSetup, const Chimera::GPIO::GPIOClass_sPtr &gyroCS,
+                                      const Chimera::GPIO::PinInit &gyroSetup )
+  {
+    Chimera::Status_t result = Chimera::CommonStatusCodes::OK;
+
+    if ( !accelMagCS || !gyroCS )
+    {
+      result = Chimera::CommonStatusCodes::INVAL_FUNC_PARAM;
+    }
+    else
+    {
+      accelMagCS->init( accelMagSetup.port, accelMagSetup.pin );
+      gyroCS->init( gyroSetup.port, gyroSetup.pin );
+      
+      this->accelMagCS = accelMagCS;
+      this->gyroCS     = gyroCS;
+      chipSelectsAttached = true;
+    }
+
+
+    return result;
+  }
 
   Chimera::Status_t Driver::calibrate( const Chimera::Modules::IMU::Sensor_t chip )
   {
     using namespace Chimera::Modules::IMU;
-
-    if ( chip == Sensor_t::GYRO )
+    Chimera::Status_t result = Chimera::CommonStatusCodes::OK;
+    
+    switch ( chip )
     {
-      cmd_pkt.fill( 0 );
-      int16_t _gyro_bias[ 3 ] = { 0, 0, 0 };
-      uint8_t samples;
+      case Sensor_t::ACCEL:
+        calibrateAccel();
+        break;
 
-      // Grab the current register settings
-      cmd_pkt[ 0 ] = CTRL_REG5_G | LSM_READ_BIT;
-      read_pkt( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), 2 );
+      case Sensor_t::GYRO:
+        calibrateGyro();
+        break;
 
-      // Enable the FIFO and then wait for it to take effect
-      cmd_pkt[ 0 ] = CTRL_REG5_G;
-      cmd_pkt[ 1 ] = rcv_pkt[ 1 ] | 0x40;
-      write_pkt( Sensor_t::GYRO, cmd_pkt.data(), 2 );
-      Chimera::delayMilliseconds( 20 );
+      case Sensor_t::MAG:
+        calibrateMag();
+        break;
 
-      // Enable Sensor_t::GYRO FIFO stream mode and set watermark at 32 samples
-      cmd_pkt[ 0 ] = FIFO_CTRL_REG_G;
-      cmd_pkt[ 1 ] = 0x20 | 0x1F;
-      write_pkt( Sensor_t::GYRO, cmd_pkt.data(), 2 );
-      Chimera::delayMilliseconds( 1000 );
+      case Sensor_t::TEMP:
+      default:
+        result = Chimera::CommonStatusCodes::FAIL;
+        break;
+    };
 
-      // Read number of stored samples
-      cmd_pkt[ 0 ] = FIFO_SRC_REG_G | LSM_READ_BIT;
-      cmd_pkt[ 1 ] = 0x00;
-      read_pkt( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), 2 );
-      samples = ( rcv_pkt[ 1 ] & 0x1F );
-
-      // Read the Sensor_t::GYRO data stored in the FIFO
-      cmd_pkt.fill( 0 );
-      cmd_pkt[ 0 ] = OUT_X_L_G | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
-
-      for ( uint32_t i = 0; i < samples; i++ )
-      {
-        read_pkt( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), 7 );
-        _gyro_bias[ 0 ] += ( ( ( int16_t )rcv_pkt[ 2 ] << 8 ) | rcv_pkt[ 1 ] );
-        _gyro_bias[ 1 ] += ( ( ( int16_t )rcv_pkt[ 4 ] << 8 ) | rcv_pkt[ 3 ] );
-        _gyro_bias[ 2 ] += ( ( ( int16_t )rcv_pkt[ 6 ] << 8 ) | rcv_pkt[ 5 ] );
-      }
-
-      // average the data
-      _gyro_bias[ 0 ] /= samples;
-      _gyro_bias[ 1 ] /= samples;
-      _gyro_bias[ 2 ] /= samples;
-
-      // Properly scale the data to get deg/s
-      settings.bias.sensor1.x = ( float )_gyro_bias[ 0 ] * settings.resolution.gyro;
-      settings.bias.sensor1.y = ( float )_gyro_bias[ 1 ] * settings.resolution.gyro;
-      settings.bias.sensor1.z = ( float )_gyro_bias[ 2 ] * settings.resolution.gyro;
-
-      // Grab the current register settings
-      cmd_pkt[ 0 ] = CTRL_REG5_G | LSM_READ_BIT;
-      read_pkt( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), 2 );
-
-      // Disable the FIFO and then wait for it to take effect
-      cmd_pkt[ 0 ] = CTRL_REG5_G;
-      cmd_pkt[ 1 ] = rcv_pkt[ 1 ] & ~0x40;
-      write_pkt( Sensor_t::GYRO, cmd_pkt.data(), 2 );
-      Chimera::delayMilliseconds( 20 );
-
-      // Enable Sensor_t::GYRO bypass mode
-      cmd_pkt[ 0 ] = FIFO_CTRL_REG_G;
-      cmd_pkt[ 1 ] = 0x00;
-      write_pkt( Sensor_t::GYRO, cmd_pkt.data(), 2 );
-    }
-
-    if ( chip == Sensor_t::ACCEL )
-    {
-      cmd_pkt.fill( 0 );
-      uint16_t _accel_bias[ 3 ] = { 0, 0, 0 };
-      uint8_t samples;
-
-      // Grab the current register settings
-      cmd_pkt[ 0 ] = CTRL_REG0_XM | LSM_READ_BIT;
-      read_pkt( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 2 );
-
-      // Enable  Sensor_t::ACCELerometer FIFO and wait for it to take effect
-      cmd_pkt[ 0 ] = CTRL_REG0_XM;
-      cmd_pkt[ 1 ] = rcv_pkt[ 1 ] | 0x40;
-      write_pkt( Sensor_t::ACCEL, cmd_pkt.data(), 2 );
-      Chimera::delayMilliseconds( 20 );
-
-      // Enable  Sensor_t::ACCELerometer FIFO stream mode and set watermark at 32 samples
-      cmd_pkt[ 0 ] = FIFO_CTRL_REG;
-      cmd_pkt[ 1 ] = 0x20 | 0x1F;
-      write_pkt( Sensor_t::ACCEL, cmd_pkt.data(), 2 );
-      Chimera::delayMilliseconds( 1000 );
-
-      // Read number of stored samples
-      cmd_pkt[ 0 ] = FIFO_SRC_REG | LSM_READ_BIT;
-      cmd_pkt[ 1 ] = 0x00;
-      read_pkt( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 2 );
-      samples = ( rcv_pkt[ 1 ] & 0x1F );
-
-      // Read the  Sensor_t::ACCELerometer data stored in the FIFO
-      cmd_pkt.fill( 0 );
-      cmd_pkt[ 0 ] = OUT_X_L_A | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
-
-      for ( uint32_t i = 0; i < samples; i++ )
-      {
-        read_pkt( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 7 );
-        _accel_bias[ 0 ] += ( ( ( int16_t )rcv_pkt[ 2 ] << 8 ) | rcv_pkt[ 1 ] );
-        _accel_bias[ 1 ] += ( ( ( int16_t )rcv_pkt[ 4 ] << 8 ) | rcv_pkt[ 3 ] );
-        _accel_bias[ 2 ] += ( ( ( int16_t )rcv_pkt[ 6 ] << 8 ) | rcv_pkt[ 5 ] ) -
-                            ( int16_t )( 1.0f / settings.resolution.accel );    // Assumes sensor facing up!
-      }
-
-      // average the data
-      _accel_bias[ 0 ] /= samples;
-      _accel_bias[ 1 ] /= samples;
-      _accel_bias[ 2 ] /= samples;
-
-      // Properly scale data to get gs
-      settings.bias.sensor0.x = ( float )_accel_bias[ 0 ] * settings.resolution.accel;
-      settings.bias.sensor0.y = ( float )_accel_bias[ 1 ] * settings.resolution.accel;
-      settings.bias.sensor0.z = ( float )_accel_bias[ 2 ] * settings.resolution.accel;
-
-      // Grab the current register settings
-      cmd_pkt[ 0 ] = CTRL_REG0_XM | LSM_READ_BIT;
-      read_pkt( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 2 );
-
-      // Disable the FIFO and then wait for it to take effect
-      cmd_pkt[ 0 ] = CTRL_REG0_XM;
-      cmd_pkt[ 1 ] = rcv_pkt[ 1 ] & ~0x40;
-      write_pkt( Sensor_t::ACCEL, cmd_pkt.data(), 2 );
-      Chimera::delayMilliseconds( 20 );
-
-      // Enable  Sensor_t::ACCELerometer bypass mode
-      cmd_pkt[ 0 ] = FIFO_CTRL_REG;
-      cmd_pkt[ 1 ] = 0x00;
-      write_pkt( Sensor_t::ACCEL, cmd_pkt.data(), 2 );
-    }
+    return result;
   }
 
   Chimera::Status_t Driver::reset()
   {
-    return Chimera::CommonStatusCodes::NOT_SUPPORTED;
+    using namespace Chimera::Modules::IMU;
+    static constexpr size_t rebootDelay = 50;
+    uint8_t regCache = 0;
+
+    /*------------------------------------------------
+    Reload accelerometer factory calibration
+    ------------------------------------------------*/
+    regCache = readRegister( Sensor_t::ACCEL, CTRL_REG0_XM );
+    
+    regCache |= CTRL_REG0_XM_BOOT;
+    writeRegister( Sensor_t::ACCEL, CTRL_REG0_XM, regCache & CTRL_REG0_XM_MSK );
+    Chimera::delayMilliseconds( rebootDelay );
+
+    regCache &= ~CTRL_REG0_XM_BOOT;
+    writeRegister( Sensor_t::ACCEL, CTRL_REG0_XM, regCache & CTRL_REG0_XM_MSK );
+    Chimera::delayMilliseconds( rebootDelay );
+
+    /*------------------------------------------------
+    Reload gyro factory calibration
+    ------------------------------------------------*/
+    regCache = readRegister( Sensor_t::GYRO, CTRL_REG5_G );
+    
+    regCache |= CTRL_REG5_G_BOOT;
+    writeRegister( Sensor_t::GYRO, CTRL_REG5_G, regCache );
+    Chimera::delayMilliseconds( rebootDelay );
+
+    regCache &= ~CTRL_REG5_G_BOOT;
+    writeRegister( Sensor_t::GYRO, CTRL_REG5_G, regCache );
+    Chimera::delayMilliseconds( rebootDelay );
+    
+    return Chimera::CommonStatusCodes::OK;
   }
 
-  Chimera::Status_t assignDOF( const Chimera::Modules::IMU::Sensor_t sensor0, const Chimera::Modules::IMU::Sensor_t sensor1,
-                               const Chimera::Modules::IMU::Sensor_t sensor2 )
+  Chimera::Status_t Driver::assignDOF( const Chimera::Modules::IMU::Sensor_t sensor0,
+                                       const Chimera::Modules::IMU::Sensor_t sensor1,
+                                       const Chimera::Modules::IMU::Sensor_t sensor2 )
   {
     /*-------------------------------------------------
     By default the sensors will be configured as:
@@ -277,75 +248,76 @@ namespace LSM9DS0
   Chimera::Status_t Driver::measure( const Chimera::Modules::IMU::Sensor_t chip, void *const measurement, const size_t size )
   {
     using namespace Chimera::Modules::IMU;
-    constexpr size_t IMU_READ_LEN = 7;
-    constexpr size_t TEMP_READ_LEN = 3;
-    constexpr size_t SHIFT = std::numeric_limits<uint8_t>::digits;
+    constexpr size_t SHIFT         = std::numeric_limits<uint8_t>::digits;
 
     Chimera::Status_t result = Chimera::CommonStatusCodes::OK;
 
-    cmd_pkt.fill( 0 );
-    rcv_pkt.fill( 0 );
-
-    switch ( chip )
+    if ( size != sizeof( data ) )
     {
-      case Sensor_t::ACCEL:
-        cmd_pkt[ 0 ] = OUT_X_L_A | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
-        read_pkt( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), IMU_READ_LEN );
-
-        rawData.sensor0.x = static_cast<int16_t>(( rcv_pkt[ 2 ] << SHIFT ) | rcv_pkt[ 1 ]);
-        rawData.sensor0.y = static_cast<int16_t>(( rcv_pkt[ 4 ] << SHIFT ) | rcv_pkt[ 3 ]);
-        rawData.sensor0.z = static_cast<int16_t>(( rcv_pkt[ 6 ] << SHIFT ) | rcv_pkt[ 5 ]);
-        break;
-
-      case Sensor_t::GYRO:
-        cmd_pkt[ 0 ] = OUT_X_L_G | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
-        read_pkt( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), IMU_READ_LEN );
-
-        rawData.sensor1.x = static_cast<int16_t>(( rcv_pkt[ 2 ] << SHIFT ) | rcv_pkt[ 1 ]);
-        rawData.sensor1.y = static_cast<int16_t>(( rcv_pkt[ 4 ] << SHIFT ) | rcv_pkt[ 3 ]);
-        rawData.sensor1.z = static_cast<int16_t>(( rcv_pkt[ 6 ] << SHIFT ) | rcv_pkt[ 5 ]);
-        break;
-
-      case Sensor_t::MAG:
-        cmd_pkt[ 0 ] = OUT_X_L_M | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
-        read_pkt( Sensor_t::MAG, cmd_pkt.data(), rcv_pkt.data(), IMU_READ_LEN );
-
-        rawData.sensor2.x = static_cast<int16_t>(( rcv_pkt[ 2 ] << SHIFT ) | rcv_pkt[ 1 ]);
-        rawData.sensor2.y = static_cast<int16_t>(( rcv_pkt[ 4 ] << SHIFT ) | rcv_pkt[ 3 ]);
-        rawData.sensor2.z = static_cast<int16_t>(( rcv_pkt[ 6 ] << SHIFT ) | rcv_pkt[ 5 ]);
-        break;
-
-      case Sensor_t::TEMP:
-        cmd_pkt[ 0 ] = OUT_TEMP_L_XM | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
-        read_pkt( Sensor_t::TEMP, cmd_pkt.data(), rcv_pkt.data(), TEMP_READ_LEN );
-
-        // temperature_data = (((int16_t)rcv_pkt[2] << 12) | rcv_pkt[1] << 4) >> 4; // Temperature is a 12-bit signed integer
-        break;
-
-      default:
-        break;
+      result = Chimera::CommonStatusCodes::INVAL_FUNC_PARAM;
     }
+    else
+    {
+      Eigen::Matrix<int16_t, 3, 1> rawData;
+      cmd_pkt.fill( 0 );
+      rcv_pkt.fill( 0 );
 
-    return result;
-  }
+      switch ( chip )
+      {
+        case Sensor_t::ACCEL:
+          cmd_pkt[ 0 ] = OUT_X_L_A | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
+          readCmd( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), IMU_READ_LEN );
 
-  Chimera::Status_t Driver::attachHW( Chimera::SPI::SPIClass_sPtr &spi, Chimera::GPIO::GPIOClass_sPtr &accelMagCS,
-                                      Chimera::GPIO::GPIOClass_sPtr &gyroCS )
-  {
-    Chimera::Status_t result = Chimera::CommonStatusCodes::OK;
+          rawData[0] = static_cast<int16_t>( ( rcv_pkt[ 2 ] << SHIFT ) | rcv_pkt[ 1 ] );
+          rawData[1] = static_cast<int16_t>( ( rcv_pkt[ 4 ] << SHIFT ) | rcv_pkt[ 3 ] );
+          rawData[2] = static_cast<int16_t>( ( rcv_pkt[ 6 ] << SHIFT ) | rcv_pkt[ 5 ] );
 
-    this->spi = spi;
-    this->accelMagCS = accelMagCS;
-    this->gyroCS = gyroCS;
-    hardwareAttached = true;
+          data.sensor0 = convertRawAccel( rawData ) - settings.bias.sensor0;
+          break;
+
+        case Sensor_t::GYRO:
+          cmd_pkt[ 0 ] = OUT_X_L_G | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
+          readCmd( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), IMU_READ_LEN );
+
+          rawData[0] = static_cast<int16_t>( ( rcv_pkt[ 2 ] << SHIFT ) | rcv_pkt[ 1 ] );
+          rawData[1] = static_cast<int16_t>( ( rcv_pkt[ 4 ] << SHIFT ) | rcv_pkt[ 3 ] );
+          rawData[2] = static_cast<int16_t>( ( rcv_pkt[ 6 ] << SHIFT ) | rcv_pkt[ 5 ] );
+
+          data.sensor1 = convertRawGyro( rawData ) - settings.bias.sensor1;
+          break;
+
+        case Sensor_t::MAG:
+          cmd_pkt[ 0 ] = OUT_X_L_M | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
+          readCmd( Sensor_t::MAG, cmd_pkt.data(), rcv_pkt.data(), IMU_READ_LEN );
+
+          rawData[0] = static_cast<int16_t>( ( rcv_pkt[ 2 ] << SHIFT ) | rcv_pkt[ 1 ] );
+          rawData[1] = static_cast<int16_t>( ( rcv_pkt[ 4 ] << SHIFT ) | rcv_pkt[ 3 ] );
+          rawData[2] = static_cast<int16_t>( ( rcv_pkt[ 6 ] << SHIFT ) | rcv_pkt[ 5 ] );
+
+          data.sensor2 = convertRawMag( rawData ) - settings.bias.sensor2;
+          break;
+
+        case Sensor_t::TEMP:
+          cmd_pkt[ 0 ] = OUT_TEMP_L_XM | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
+          readCmd( Sensor_t::TEMP, cmd_pkt.data(), rcv_pkt.data(), TEMP_READ_LEN );
+
+          // temperature_data = (((int16_t)rcv_pkt[2] << 12) | rcv_pkt[1] << 4) >> 4; // Temperature is a 12-bit signed integer
+          break;
+
+        default:
+          break;
+      }
+
+      memcpy( measurement, &data, sizeof( data ) );
+    }
 
     return result;
   }
 
   Chimera::Status_t Driver::attachSettings( const Settings &settings )
   {
-    this->settings = settings;
-    settingsAttached = true;
+    this->settings   = settings;
+    imuSettingsAttached = true;
     return Chimera::CommonStatusCodes::OK;
   }
 
@@ -358,51 +330,41 @@ namespace LSM9DS0
     cmd_pkt.fill( 0 );
     rcv_pkt.fill( 0 );
 
+    uint8_t cachedSettings = 0u;
+    
     switch ( sensor )
     {
       case Sensor_t::ACCEL:
-        cmd_pkt[ 0 ] = CTRL_REG2_XM | LSM_READ_BIT;
-        read_pkt( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 2 );
+        cachedSettings = readRegister( Sensor_t::ACCEL, CTRL_REG2_XM );
+        cachedSettings &= ~CTRL_REG2_XM_SCL_MSK;
+        cachedSettings |= ( value << CTRL_REG2_XM_SCL_POS ) & CTRL_REG2_XM_SCL_MSK;
 
-        rcv_pkt[ 1 ] &= ~CTRL_REG2_XM_SCL_MSK;
-        rcv_pkt[ 1 ] |= ( value << CTRL_REG2_XM_SCL_POS ) & CTRL_REG2_XM_SCL_MSK;
-
-        cmd_pkt[ 0 ] &= LSM_WRITE_BIT;
-        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-        write_pkt( Sensor_t::ACCEL, cmd_pkt.data(), 2 );
+        writeRegister( Sensor_t::ACCEL, CTRL_REG2_XM, cachedSettings );
 
         settings.scale.accel = static_cast<AccelerometerScale>( value );
-        calc_aRes();
+        updateAccelResolution();
         break;
 
       case Sensor_t::GYRO:
-        cmd_pkt[ 0 ] = CTRL_REG4_G | LSM_READ_BIT;
-        read_pkt( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), 2 );
+        cachedSettings = readRegister( Sensor_t::GYRO, CTRL_REG4_G );
+        cachedSettings &= ~CTRL_REG4_G_SCL_MSK;
+        cachedSettings |= ( value << CTRL_REG4_G_SCL_POS ) & CTRL_REG4_G_SCL_MSK;
 
-        rcv_pkt[ 1 ] &= ~CTRL_REG4_G_SCL_MSK;
-        rcv_pkt[ 1 ] |= ( value << CTRL_REG4_G_SCL_POS ) & CTRL_REG4_G_SCL_MSK;
-
-        cmd_pkt[ 0 ] &= LSM_WRITE_BIT;
-        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-        write_pkt( Sensor_t::GYRO, cmd_pkt.data(), 2 );
+        writeRegister( Sensor_t::GYRO, CTRL_REG4_G, cachedSettings );
 
         settings.scale.gyro = static_cast<GyroscopeScale>( value );
-        calc_gRes();
+        updateGyroResolution();
         break;
 
       case Sensor_t::MAG:
-        cmd_pkt[ 0 ] = CTRL_REG6_XM | LSM_READ_BIT;
-        read_pkt( Sensor_t::MAG, cmd_pkt.data(), rcv_pkt.data(), 2 );
+        cachedSettings = readRegister( Sensor_t::MAG, CTRL_REG6_XM );
+        cachedSettings &= ~CTRL_REG6_XM_SCL_MSK;
+        cachedSettings |= ( value << CTRL_REG6_XM_SCL_POS ) & CTRL_REG6_XM_SCL_MSK;
 
-        rcv_pkt[ 1 ] &= ~CTRL_REG6_XM_SCL_MSK;
-        rcv_pkt[ 1 ] |= ( value << CTRL_REG6_XM_SCL_POS ) & CTRL_REG6_XM_SCL_MSK;
-
-        cmd_pkt[ 0 ] &= LSM_WRITE_BIT;
-        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-        write_pkt( Sensor_t::MAG, cmd_pkt.data(), 2 );
-
+        writeRegister( Sensor_t::MAG, CTRL_REG6_XM, cachedSettings );
+        
         settings.scale.mag = static_cast<MagnetometerScale>( value );
-        calc_mRes();
+        updateMagResolution();
         break;
 
       case Sensor_t::TEMP:
@@ -423,47 +385,34 @@ namespace LSM9DS0
     cmd_pkt.fill( 0 );
     rcv_pkt.fill( 0 );
 
+    uint8_t cachedSettings = 0u;
+
     switch ( sensor )
     {
       case Sensor_t::ACCEL:
-        cmd_pkt[ 0 ] = CTRL_REG1_XM | LSM_READ_BIT;
-        read_pkt( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 2 );
+        cachedSettings = readRegister( Sensor_t::ACCEL, CTRL_REG1_XM );
+        cachedSettings &= ~CTRL_REG1_XM_ODR_MSK;
+        cachedSettings |= ( value << CTRL_REG1_XM_ODR_POS ) & CTRL_REG1_XM_ODR_MSK;
 
-        rcv_pkt[ 1 ] &= ~CTRL_REG1_XM_ODR_MSK;
-        rcv_pkt[ 1 ] |= ( value << CTRL_REG1_XM_ODR_POS ) & CTRL_REG1_XM_ODR_MSK;
-
-        cmd_pkt[ 0 ] &= LSM_WRITE_BIT;
-        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-        write_pkt( Sensor_t::ACCEL, cmd_pkt.data(), 2 );
-
+        writeRegister( Sensor_t::ACCEL, CTRL_REG1_XM, cachedSettings );
         settings.outputDataRate.accel = static_cast<AccelerometerOuputDataRate>( value );
         break;
 
       case Sensor_t::GYRO:
-        cmd_pkt[ 0 ] = CTRL_REG1_G | LSM_READ_BIT;
-        read_pkt( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), 2 );
-
-        rcv_pkt[ 1 ] &= ~CTRL_REG1_G_ODR_MSK;
-        rcv_pkt[ 1 ] |= ( value << CTRL_REG1_G_ODR_POS ) & CTRL_REG1_G_ODR_MSK;
-
-        cmd_pkt[ 0 ] &= LSM_WRITE_BIT;
-        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-        write_pkt( Sensor_t::GYRO, cmd_pkt.data(), 2 );
-
+        cachedSettings = readRegister( Sensor_t::GYRO, CTRL_REG1_G );
+        cachedSettings &= ~CTRL_REG1_G_ODR_MSK;
+        cachedSettings |= ( value << CTRL_REG1_G_ODR_POS ) & CTRL_REG1_G_ODR_MSK;
+        
+        writeRegister( Sensor_t::GYRO, CTRL_REG1_G, cachedSettings );
         settings.outputDataRate.gyro = static_cast<GyroscopeOutputDataRate>( value );
         break;
 
       case Sensor_t::MAG:
-        cmd_pkt[ 0 ] = CTRL_REG5_XM | LSM_READ_BIT;
-        read_pkt( Sensor_t::MAG, cmd_pkt.data(), rcv_pkt.data(), 2 );
+        cachedSettings = readRegister( Sensor_t::MAG, CTRL_REG5_XM );
+        cachedSettings &= ~CTRL_REG5_XM_ODR_MSK;
+        cachedSettings |= ( value << CTRL_REG5_XM_ODR_POS ) & CTRL_REG5_XM_ODR_MSK;
 
-        rcv_pkt[ 1 ] &= ~CTRL_REG5_XM_ODR_MSK;
-        rcv_pkt[ 1 ] |= ( value << CTRL_REG5_XM_ODR_POS ) & CTRL_REG5_XM_ODR_MSK;
-
-        cmd_pkt[ 0 ] &= LSM_WRITE_BIT;
-        cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-        write_pkt( Sensor_t::MAG, cmd_pkt.data(), 2 );
-
+        writeRegister( Sensor_t::MAG, CTRL_REG5_XM, cachedSettings );
         settings.outputDataRate.mag = static_cast<MagnetometerOutputDataRate>( value );
         break;
 
@@ -487,16 +436,12 @@ namespace LSM9DS0
       cmd_pkt.fill( 0 );
       rcv_pkt.fill( 0 );
 
-      cmd_pkt[ 0 ] = CTRL_REG2_XM | LSM_READ_BIT;
-      read_pkt( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), 2 );
+      uint8_t cachedSettings = readRegister( Sensor_t::ACCEL, CTRL_REG2_XM );
 
-      rcv_pkt[ 1 ] &= ~CTRL_REG2_XM_ABW_MSK;
-      rcv_pkt[ 1 ] |= ( value << CTRL_REG2_XM_ABW_POS ) & CTRL_REG2_XM_ABW_MSK;
+      cachedSettings &= ~CTRL_REG2_XM_ABW_MSK;
+      cachedSettings |= ( value << CTRL_REG2_XM_ABW_POS ) & CTRL_REG2_XM_ABW_MSK;
 
-      cmd_pkt[ 0 ] &= LSM_WRITE_BIT;
-      cmd_pkt[ 1 ] = rcv_pkt[ 1 ];
-      write_pkt( Sensor_t::ACCEL, cmd_pkt.data(), 2 );
-
+      writeRegister( Sensor_t::ACCEL, CTRL_REG2_XM, cachedSettings );
       settings.aaFilterBW = value;
       result              = Chimera::CommonStatusCodes::OK;
     }
@@ -504,70 +449,319 @@ namespace LSM9DS0
     return result;
   }
 
-  void Driver::calc_aRes()
+  void Driver::calibrateAccel()
   {
-    settings.resolution.accel =
-        settings.scale.accel == A_SCALE_16G ? 16.0f / 32768.0f : ( ( ( float )settings.scale.accel + 1.0f ) * 2.0f ) / 32768.0f;
-  }
+    using namespace Chimera::Modules::IMU;
+    
+    /*------------------------------------------------
+    Initialize everything properly
+    ------------------------------------------------*/
+    cmd_pkt.fill( 0 );
+    Eigen::Matrix<int16_t, 3, 1> rawAccelBias;
+    uint8_t samples = 0;
+    uint8_t registerCache = 0;
 
-  void Driver::calc_mRes()
-  {
-    settings.resolution.mag =
-        settings.scale.mag == M_SCALE_2GS ? 2.0f / 32768.0f : ( float )( settings.scale.mag << 2 ) / 32768.0f;
-  }
+    /*------------------------------------------------
+    Enable FIFO and wait for it to take effect
+    ------------------------------------------------*/
+    registerCache = readRegister( Sensor_t::ACCEL, CTRL_REG0_XM );
+    registerCache |= CTRL_REG0_XM_FIFO_EN;
+    writeRegister( Sensor_t::ACCEL, CTRL_REG0_XM, registerCache & CTRL_REG0_XM_MSK );
+    Chimera::delayMilliseconds( 20 );
 
-  void Driver::calc_gRes()
-  {
-    switch ( settings.scale.gyro )
+    /*------------------------------------------------
+    Enable FIFO stream mode and set watermark at 32 samples
+    ------------------------------------------------*/
+    registerCache = readRegister( Sensor_t::ACCEL, FIFO_CTRL_REG_XM );
+    registerCache |= FIFO_CTRL_REG_XM_FM_STREAM | FIFO_CTRL_REG_XM_THRSH_MSK;
+    writeRegister( Sensor_t::ACCEL, FIFO_CTRL_REG_XM, registerCache );
+
+    /*------------------------------------------------
+    Create a running average of the bias over time
+    ------------------------------------------------*/
+    for ( uint8_t x = 0; x < 5; x++ )
     {
-      case G_SCALE_245DPS:
-        settings.resolution.gyro = 245.0f / 32768.0f;
+      samples = readRegister( Sensor_t::ACCEL, FIFO_SRC_REG ) & FIFO_CTRL_REG_XM_THRSH_MSK;
+
+      /*------------------------------------------------
+      Read the data stored in the FIFO
+      ------------------------------------------------*/
+      cmd_pkt.fill( 0 );
+      cmd_pkt[ 0 ] = OUT_X_L_A | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
+
+      for ( uint32_t i = 0; i < samples; i++ )
+      {
+        readCmd( Sensor_t::ACCEL, cmd_pkt.data(), rcv_pkt.data(), IMU_READ_LEN );
+        rawAccelBias[ 0 ] += ( ( static_cast<int16_t>( rcv_pkt[ 2 ] << 8 ) ) | rcv_pkt[ 1 ] );
+        rawAccelBias[ 1 ] += ( ( static_cast<int16_t>( rcv_pkt[ 4 ] << 8 ) ) | rcv_pkt[ 3 ] );
+        rawAccelBias[ 2 ] += ( ( static_cast<int16_t>( rcv_pkt[ 6 ] << 8 ) ) | rcv_pkt[ 5 ] );
+      }
+      /*------------------------------------------------
+      Average all the data up to this point
+      ------------------------------------------------*/
+      rawAccelBias[ 0 ] /= samples + x;
+      rawAccelBias[ 1 ] /= samples + x;
+      rawAccelBias[ 2 ] /= samples + x;
+
+      Chimera::delayMilliseconds( 500 );
+    }
+    
+    /*------------------------------------------------
+    Cache the converted bias data for later use
+    ------------------------------------------------*/
+    settings.bias.sensor0 = convertRawAccel( rawAccelBias );
+
+    /*------------------------------------------------
+    Disable the FIFO and then wait for it to take effect
+    ------------------------------------------------*/
+    registerCache = readRegister( Sensor_t::ACCEL, CTRL_REG0_XM );
+    registerCache &= ~CTRL_REG0_XM_FIFO_EN;
+    writeRegister( Sensor_t::ACCEL, CTRL_REG0_XM, registerCache & CTRL_REG0_XM_MSK );
+    Chimera::delayMilliseconds( 20 );
+
+    /*------------------------------------------------
+    Set the FIFO back to bypass mode and clear the watermark
+    ------------------------------------------------*/
+    writeRegister( Sensor_t::ACCEL, FIFO_CTRL_REG_XM, 0x00 );
+  }
+  
+  void Driver::calibrateGyro()
+  {
+    using namespace Chimera::Modules::IMU;
+
+    /*------------------------------------------------
+    Initialize everything properly
+    ------------------------------------------------*/
+    cmd_pkt.fill( 0 );
+    Eigen::Matrix<int16_t, 3, 1> rawGyroBias;
+    uint8_t samples = 0;
+    uint8_t registerCache = 0;
+
+    /*------------------------------------------------
+    Enable the FIFO and then wait for it to take effect
+    ------------------------------------------------*/
+    registerCache = readRegister( Sensor_t::GYRO, CTRL_REG5_G );
+    registerCache |= CTRL_REG5_G_FIFO_EN;
+    writeRegister( Sensor_t::GYRO, CTRL_REG5_G, registerCache );
+    Chimera::delayMilliseconds( 20 );
+
+    /*------------------------------------------------
+    Enable FIFO stream mode and set watermark at 32 samples (max)
+    ------------------------------------------------*/
+    registerCache = readRegister( Sensor_t::GYRO, FIFO_CTRL_REG_G );
+    registerCache |= FIFO_CTRL_REG_G_FM_STREAM | FIFO_CTRL_REG_G_THRSH_MSK;
+    writeRegister( Sensor_t::GYRO, FIFO_CTRL_REG_G, registerCache );
+
+    /*------------------------------------------------
+    Create a running average of the bias over time
+    ------------------------------------------------*/
+    for ( uint8_t x = 0; x < 5; x++ )
+    {
+      samples = readRegister( Sensor_t::GYRO, FIFO_SRC_REG_G ) & FIFO_SRC_REG_G_FSS_MSK;
+
+      /*------------------------------------------------
+      Read the data stored in the FIFO
+      ------------------------------------------------*/
+      cmd_pkt.fill( 0 );
+      cmd_pkt[ 0 ] = OUT_X_L_G | LSM_READ_BIT | LSM_AUTO_INCR_BIT;
+
+      for ( uint32_t i = 0; i < samples; i++ )
+      {
+        readCmd( Sensor_t::GYRO, cmd_pkt.data(), rcv_pkt.data(), 7 );
+        rawGyroBias[ 0 ] += ( ( static_cast<int16_t>( rcv_pkt[ 2 ] ) << 8 ) | rcv_pkt[ 1 ] );
+        rawGyroBias[ 1 ] += ( ( static_cast<int16_t>( rcv_pkt[ 4 ] ) << 8 ) | rcv_pkt[ 3 ] );
+        rawGyroBias[ 2 ] += ( ( static_cast<int16_t>( rcv_pkt[ 6 ] ) << 8 ) | rcv_pkt[ 5 ] );
+      }
+
+      /*------------------------------------------------
+      Average all the data up to this point.
+      ------------------------------------------------*/
+      if ( samples )
+      {
+        rawGyroBias[ 0 ] /= samples + x;
+        rawGyroBias[ 1 ] /= samples + x;
+        rawGyroBias[ 2 ] /= samples + x;
+      }
+
+      Chimera::delayMilliseconds( 500 );
+    }
+    
+    /*------------------------------------------------
+    Cache the converted bias data for later use
+    ------------------------------------------------*/
+    settings.bias.sensor1 = convertRawGyro( rawGyroBias );
+
+    /*------------------------------------------------
+    Disable the FIFO and then wait for it to take effect
+    ------------------------------------------------*/
+    registerCache = readRegister( Sensor_t::GYRO, CTRL_REG5_G );
+    registerCache &= ~CTRL_REG5_G_FIFO_EN;
+    writeRegister( Sensor_t::GYRO, CTRL_REG5_G, registerCache );
+    Chimera::delayMilliseconds( 20 );
+    
+    /*------------------------------------------------
+    Set the FIFO back to bypass mode and clear the watermark
+    ------------------------------------------------*/
+    writeRegister( Sensor_t::GYRO, FIFO_CTRL_REG_G, 0x00 );
+  }
+  
+  void Driver::calibrateMag()
+  {
+    //Currently not supported
+    settings.bias.sensor2[0] = 0.0f;
+    settings.bias.sensor2[1] = 0.0f;
+    settings.bias.sensor2[2] = 0.0f;
+  }
+  
+  void Driver::updateAccelResolution()
+  {
+    /*------------------------------------------------
+    Resolution in milli-g's per ADC tick; Datasheet Pg.13
+    ------------------------------------------------*/
+    switch ( settings.scale.accel )
+    {
+      case A_SCALE_2G:
+        settings.resolution.accel = 0.061f;
         break;
-      case G_SCALE_500DPS:
-        settings.resolution.gyro = 500.0f / 32768.0f;
+        
+      case A_SCALE_4G:
+        settings.resolution.accel = 0.122f;
         break;
-      case G_SCALE_2000DPS:
-        settings.resolution.gyro = 2000.0f / 32768.0f;
+        
+      case A_SCALE_6G:
+        settings.resolution.accel = 0.183f;
+        break;
+        
+      case A_SCALE_8G:
+        settings.resolution.accel = 0.244f;
+        break;
+        
+      case A_SCALE_16G:
+        settings.resolution.accel = 0.732f;
         break;
     }
   }
 
-  void Driver::calc_gyro()
+  void Driver::updateMagResolution()
   {
-    data.sensor1.x = ( settings.resolution.gyro * ( float )rawData.sensor1.x );
-    data.sensor1.y = ( settings.resolution.gyro * ( float )rawData.sensor1.y );
-    data.sensor1.z = ( settings.resolution.gyro * ( float )rawData.sensor1.z );
+    /*------------------------------------------------
+    Resolution in milli-gauss's per ADC tick; Datasheet Pg.13
+    ------------------------------------------------*/
+    switch ( settings.scale.mag )
+    {
+      case MagnetometerScale::M_SCALE_2GS:
+        settings.resolution.mag = 0.08f;
+        break;
+        
+      case MagnetometerScale::M_SCALE_4GS:
+        settings.resolution.mag = 0.16f;
+        break;
+        
+      case MagnetometerScale::M_SCALE_8GS:
+        settings.resolution.mag = 0.32f;
+        break;
+        
+      case MagnetometerScale::M_SCALE_12GS:
+        settings.resolution.mag = 0.48f;
+        break;
+    }
   }
 
-  void Driver::calc_accel()
+  void Driver::updateGyroResolution()
   {
-    data.sensor0.x = ( settings.resolution.accel * ( float )rawData.sensor0.x * 9.8f );
-    data.sensor0.y = ( settings.resolution.accel * ( float )rawData.sensor0.y * 9.8f );
-    data.sensor0.z = ( settings.resolution.accel * ( float )rawData.sensor0.z * 9.8f );
+    /*------------------------------------------------
+    Resolution in milli-dps's per ADC tick; Datasheet Pg.13
+    ------------------------------------------------*/
+    switch ( settings.scale.gyro )
+    {
+      case GyroscopeScale::G_SCALE_245DPS:
+        settings.resolution.gyro = 8.75f;
+        break;
+        
+      case GyroscopeScale::G_SCALE_500DPS:
+        settings.resolution.gyro = 17.50f;
+        break;
+        
+      case GyroscopeScale::G_SCALE_2000DPS:
+        settings.resolution.gyro = 70.00f;
+        break;
+    }
   }
 
-  void Driver::calc_mag()
+  Eigen::Matrix<float, 3, 1> Driver::convertRawAccel( const Eigen::Ref<const Eigen::Matrix<int16_t, 3, 1>> &data )
   {
-    data.sensor2.x = ( settings.resolution.mag * ( float )rawData.sensor2.x );
-    data.sensor2.y = ( settings.resolution.mag * ( float )rawData.sensor2.y );
-    data.sensor2.z = ( settings.resolution.mag * ( float )rawData.sensor2.z );
+    using namespace Chimera::Physics;
+    using namespace Chimera::Units;
+
+    Eigen::Matrix<float, 3, 1> output;
+
+    /* Acceleration (m/s2) = ( ( milli_g/ADCTick ) * ADCTick * g ) / 1000.0f */
+    output[ 0 ] = ( ( settings.resolution.accel * static_cast<float>( data[ 0 ] ) * GRAVITY ) / MilliToKilo<float>::val );
+    output[ 1 ] = ( ( settings.resolution.accel * static_cast<float>( data[ 1 ] ) * GRAVITY ) / MilliToKilo<float>::val );
+    output[ 2 ] = ( ( settings.resolution.accel * static_cast<float>( data[ 2 ] ) * GRAVITY ) / MilliToKilo<float>::val );
+
+    return output;
   }
 
-  void Driver::write_pkt( const Chimera::Modules::IMU::Sensor_t chip, uint8_t *cmd_buffer, size_t length )
+  Eigen::Matrix<float, 3, 1> Driver::convertRawGyro( const Eigen::Matrix<int16_t, 3, 1> &data )
   {
-    clr_CS( chip );
+    using namespace Chimera::Units;
+
+    Eigen::Matrix<float, 3, 1> output;
+
+    /* Rotation Rate (deg/s) = ( milli_dps per ADCTick ) * ADCTick / 1000.0f */
+    output[ 0 ] = ( ( settings.resolution.gyro * static_cast<float>( data[ 0 ] ) ) / MilliToKilo<float>::val );
+    output[ 1 ] = ( ( settings.resolution.gyro * static_cast<float>( data[ 1 ] ) ) / MilliToKilo<float>::val );
+    output[ 2 ] = ( ( settings.resolution.gyro * static_cast<float>( data[ 2 ] ) ) / MilliToKilo<float>::val );
+
+    return output;
+  }
+
+  Eigen::Matrix<float, 3, 1> Driver::convertRawMag( const Eigen::Ref<const Eigen::Matrix<int16_t, 3, 1>> &data )
+  {
+    using namespace Chimera::Units;
+
+    Eigen::Matrix<float, 3, 1> output;
+
+    /* Gauss (Mx/cm2) = ( milli_gauss per ADCTick ) * ADCTick / 1000.0f */
+    output[ 0 ] = ( ( settings.resolution.mag * static_cast<float>( data[ 0 ] ) ) / MilliToKilo<float>::val );
+    output[ 1 ] = ( ( settings.resolution.mag * static_cast<float>( data[ 1 ] ) ) / MilliToKilo<float>::val );
+    output[ 2 ] = ( ( settings.resolution.mag * static_cast<float>( data[ 2 ] ) ) / MilliToKilo<float>::val );
+
+    return output;
+  }
+
+  void Driver::writeCmd( const Chimera::Modules::IMU::Sensor_t chip, uint8_t *cmd_buffer, size_t length )
+  {
+    clearChipSelect( chip );
     spi->writeBytes( cmd_buffer, length, 500 );
-    set_CS( chip );
+    setChipSelect( chip );
   }
 
-  void Driver::read_pkt( const Chimera::Modules::IMU::Sensor_t chip, uint8_t *cmd_buffer, uint8_t *rcv_buffer, size_t length )
+  void Driver::readCmd( const Chimera::Modules::IMU::Sensor_t chip, uint8_t *cmd_buffer, uint8_t *rcv_buffer, size_t length )
   {
-    clr_CS( chip );
+    clearChipSelect( chip );
     spi->readWriteBytes( cmd_buffer, rcv_buffer, length, 500 );
-    set_CS( chip );
+    setChipSelect( chip );
   }
 
-  void Driver::set_CS( const Chimera::Modules::IMU::Sensor_t chip )
+  void Driver::writeRegister( const Chimera::Modules::IMU::Sensor_t chip, const uint8_t reg, const uint8_t value )
+  {
+    cmd_pkt[ 0 ] = reg; /* By default the write bit will be zero */
+    cmd_pkt[ 1 ] = value;
+    writeCmd( chip, cmd_pkt.data(), 2 );
+  }
+
+  uint8_t Driver::readRegister( const Chimera::Modules::IMU::Sensor_t chip, const uint8_t reg )
+  {
+    cmd_pkt[ 0 ] = reg | LSM_READ_BIT;
+    cmd_pkt[ 1 ] = 0x00;
+    readCmd( chip, cmd_pkt.data(), rcv_pkt.data(), 2 );
+
+    return rcv_pkt[ 1 ];
+  }
+  
+  void Driver::setChipSelect( const Chimera::Modules::IMU::Sensor_t chip )
   {
     using namespace Chimera::GPIO;
     using namespace Chimera::Modules::IMU;
@@ -588,7 +782,7 @@ namespace LSM9DS0
     }
   }
 
-  void Driver::clr_CS( const Chimera::Modules::IMU::Sensor_t chip )
+  void Driver::clearChipSelect( const Chimera::Modules::IMU::Sensor_t chip )
   {
     using namespace Chimera::GPIO;
     using namespace Chimera::Modules::IMU;
@@ -609,73 +803,138 @@ namespace LSM9DS0
     }
   }
 
-  void Driver::init_gyro()
+  void Driver::initGyro()
   {
     using namespace Chimera::Modules::IMU;
 
     cmd_pkt.fill( 0 );
 
+    /*-------------------------------------------------
+    Enable all axis and switch into normal mode
+    -------------------------------------------------*/
     cmd_pkt[ 0 ] = CTRL_REG1_G;
-    cmd_pkt[ 1 ] = 0x0F;
+    cmd_pkt[ 1 ] = CTRL_REG1_G_PD | CTRL_REG1_G_X_EN | CTRL_REG1_G_Y_EN | CTRL_REG1_G_Z_EN;
+    
+    /*-------------------------------------------------
+    Set the high pass filter to be a medium ranged value
+    -------------------------------------------------*/
     cmd_pkt[ 2 ] = CTRL_REG2_G;
-    cmd_pkt[ 3 ] = 0x00;
+    cmd_pkt[ 3 ] = ( CTRL_REG2_G_HPF_MODE_NORMAL | G_HPF_LVL_4 ) & CTRL_REG2_G_MSK;
+    
+    /*-------------------------------------------------
+    We aren't using interrupts, so this register is pointless
+    -------------------------------------------------*/
     cmd_pkt[ 4 ] = CTRL_REG3_G;
-    cmd_pkt[ 5 ] = 0x88;
+    cmd_pkt[ 5 ] = 0x00;
+    
+    /*-------------------------------------------------
+    Turn on the block data update functionality and use little endian
+    -------------------------------------------------*/
     cmd_pkt[ 6 ] = CTRL_REG4_G;
-    cmd_pkt[ 7 ] = 0x00;
+    cmd_pkt[ 7 ] = ~CTRL_REG4_G_BLE;
+    
+    /*-------------------------------------------------
+    Enable the high pass filter configured in REG2
+    -------------------------------------------------*/
     cmd_pkt[ 8 ] = CTRL_REG5_G;
-    cmd_pkt[ 9 ] = 0x00;
+    cmd_pkt[ 9 ] = CTRL_REG5_G_HPF_EN;
 
-    write_pkt( Sensor_t::GYRO, &cmd_pkt[ 0 ], 2 );
-    write_pkt( Sensor_t::GYRO, &cmd_pkt[ 2 ], 2 );
-    write_pkt( Sensor_t::GYRO, &cmd_pkt[ 4 ], 2 );
-    write_pkt( Sensor_t::GYRO, &cmd_pkt[ 6 ], 2 );
-    write_pkt( Sensor_t::GYRO, &cmd_pkt[ 8 ], 2 );
+    /*-------------------------------------------------
+    Write the commands one at a time as each needs the chip
+    select to deselect before the next can be clocked in.
+    -------------------------------------------------*/
+    writeCmd( Sensor_t::GYRO, &cmd_pkt[ 0 ], 2 );
+    writeCmd( Sensor_t::GYRO, &cmd_pkt[ 2 ], 2 );
+    writeCmd( Sensor_t::GYRO, &cmd_pkt[ 4 ], 2 );
+    writeCmd( Sensor_t::GYRO, &cmd_pkt[ 6 ], 2 );
+    writeCmd( Sensor_t::GYRO, &cmd_pkt[ 8 ], 2 );
   }
 
-  void Driver::init_accel()
+  void Driver::initAccel()
   {
     using namespace Chimera::Modules::IMU;
+    
+    uint8_t reg7Cache = readRegister( Sensor_t::MAG, CTRL_REG7_XM );
 
     cmd_pkt.fill( 0 );
 
+    /*-------------------------------------------------
+    No functionality from this register is needed
+    -------------------------------------------------*/
     cmd_pkt[ 0 ] = CTRL_REG0_XM;
     cmd_pkt[ 1 ] = 0x00;
+    
+    /*-------------------------------------------------
+    Enable all axis and turn on block data updates
+    -------------------------------------------------*/
     cmd_pkt[ 2 ] = CTRL_REG1_XM;
-    cmd_pkt[ 3 ] = 0x57;
+    cmd_pkt[ 3 ] = CTRL_REG1_XM_AX_EN | CTRL_REG1_XM_AY_EN | CTRL_REG1_XM_AZ_EN;
+
+    /*-------------------------------------------------
+    Functionality will be configured by the user. Defaults
+    to 4-wire SPI mode, which is pretty typical.
+    -------------------------------------------------*/
     cmd_pkt[ 4 ] = CTRL_REG2_XM;
     cmd_pkt[ 5 ] = 0x00;
+    
+    /*-------------------------------------------------
+    Interrupts are unsupported in this software
+    -------------------------------------------------*/
     cmd_pkt[ 6 ] = CTRL_REG3_XM;
     cmd_pkt[ 7 ] = 0x04;
 
-    write_pkt( Sensor_t::ACCEL, &cmd_pkt[ 0 ], 2 );
-    write_pkt( Sensor_t::ACCEL, &cmd_pkt[ 2 ], 2 );
-    write_pkt( Sensor_t::ACCEL, &cmd_pkt[ 4 ], 2 );
-    write_pkt( Sensor_t::ACCEL, &cmd_pkt[ 6 ], 2 );
+    /*-------------------------------------------------
+    Write the commands one at a time as each needs the chip
+    select to deselect before the next can be clocked in.
+    -------------------------------------------------*/
+    writeCmd( Sensor_t::ACCEL, &cmd_pkt[ 0 ], 2 );
+    writeCmd( Sensor_t::ACCEL, &cmd_pkt[ 2 ], 2 );
+    writeCmd( Sensor_t::ACCEL, &cmd_pkt[ 4 ], 2 );
+    writeCmd( Sensor_t::ACCEL, &cmd_pkt[ 6 ], 2 );
   }
 
-  void Driver::init_mag()
+  void Driver::initMag()
   {
     using namespace Chimera::Modules::IMU;
 
+    uint8_t reg7Cache = readRegister( Sensor_t::MAG, CTRL_REG7_XM );
+
     cmd_pkt.fill( 0 );
 
+    /*-------------------------------------------------
+    Only enable the temperature sensor. Everything else will
+    be configured by the user.
+    -------------------------------------------------*/
     cmd_pkt[ 0 ] = CTRL_REG5_XM;
-    cmd_pkt[ 1 ] = 0x94;
+    cmd_pkt[ 1 ] = CTRL_REG5_XM_TEMP_EN;
+    
+    /*-------------------------------------------------
+    Only contains Mag resolution settings, which is user configured
+    -------------------------------------------------*/
     cmd_pkt[ 2 ] = CTRL_REG6_XM;
     cmd_pkt[ 3 ] = 0x00;
-    cmd_pkt[ 4 ] = CTRL_REG7_XM;
-    cmd_pkt[ 5 ] = 0x00;
-    cmd_pkt[ 6 ] = CTRL_REG4_XM;
-    cmd_pkt[ 7 ] = 0x04;
-    cmd_pkt[ 8 ] = INT_CTRL_REG_M;
-    cmd_pkt[ 9 ] = 0x09;
 
-    write_pkt( Sensor_t::MAG, &cmd_pkt[ 0 ], 2 );
-    write_pkt( Sensor_t::MAG, &cmd_pkt[ 2 ], 2 );
-    write_pkt( Sensor_t::MAG, &cmd_pkt[ 4 ], 2 );
-    write_pkt( Sensor_t::MAG, &cmd_pkt[ 6 ], 2 );
-    write_pkt( Sensor_t::MAG, &cmd_pkt[ 8 ], 2 );
+    /*-------------------------------------------------
+    Interrupt features not supported yet
+    -------------------------------------------------*/
+    cmd_pkt[ 6 ] = CTRL_REG4_XM;
+    cmd_pkt[ 7 ] = 0x00;
+    
+    /*-------------------------------------------------
+    Interrupt features not supported yet
+    -------------------------------------------------*/
+    cmd_pkt[ 8 ] = INT_CTRL_REG_M;
+    cmd_pkt[ 9 ] = 0x00;
+
+    /*-------------------------------------------------
+    Write the commands one at a time as each needs the chip
+    select to deselect before the next can be clocked in.
+    -------------------------------------------------*/
+    writeCmd( Sensor_t::MAG, &cmd_pkt[ 0 ], 2 );
+    writeCmd( Sensor_t::MAG, &cmd_pkt[ 2 ], 2 );
+    writeCmd( Sensor_t::MAG, &cmd_pkt[ 4 ], 2 );
+    writeCmd( Sensor_t::MAG, &cmd_pkt[ 6 ], 2 );
+    writeCmd( Sensor_t::MAG, &cmd_pkt[ 8 ], 2 );
   }
 
 }    // namespace LSM9DS0

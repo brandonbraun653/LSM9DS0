@@ -17,9 +17,13 @@
 #include <cstdint>
 #include <array>
 
+/* Eigen Includes */
+#include <Eigen/Core>
+
 /* Chimera Includes */
 #include <Chimera/gpio.hpp>
 #include <Chimera/spi.hpp>
+#include <Chimera/extensions/spi_ext.hpp>
 #include <Chimera/modules/sensors/imu/imu_intf.hpp>
 #include <Chimera/modules/sensors/imu/imu_types.hpp>
 
@@ -28,13 +32,18 @@
 
 namespace LSM9DS0
 {
-  class Driver : public Chimera::Modules::IMU::Interface9DOF
+  class Driver : public Chimera::Modules::IMU::Interface9DOF, public Chimera::SPI::SPIAcceptor
   {
   public:
     Driver();
     ~Driver();
 
     Chimera::Status_t initialize() final override;
+
+    Chimera::Status_t attachSPI( const Chimera::SPI::SPIClass_sPtr &spi, Chimera::SPI::Setup &setup ) final override;
+
+    Chimera::Status_t attachCS( const Chimera::GPIO::GPIOClass_sPtr &accelMagCS, const Chimera::GPIO::PinInit &accelMagSetup,
+                                const Chimera::GPIO::GPIOClass_sPtr &gyroCS, const Chimera::GPIO::PinInit &gyroSetup );
 
     Chimera::Status_t calibrate( const Chimera::Modules::IMU::Sensor_t sensor ) final override;
 
@@ -45,9 +54,6 @@ namespace LSM9DS0
 
     Chimera::Status_t measure( const Chimera::Modules::IMU::Sensor_t sensor, void *const measurement,
                                const size_t size ) final override;
-
-    Chimera::Status_t attachHW( Chimera::SPI::SPIClass_sPtr &spi, Chimera::GPIO::GPIOClass_sPtr &accelMagCS,
-                                Chimera::GPIO::GPIOClass_sPtr &gyroCS );
 
     Chimera::Status_t attachSettings( const Settings &settings );
 
@@ -64,42 +70,38 @@ namespace LSM9DS0
     Chimera::GPIO::GPIOClass_sPtr gyroCS;
 
     Chimera::Modules::IMU::Measurement9DOF<float> data;
-    Chimera::Modules::IMU::Measurement9DOF<int16_t> rawData;
 
     static constexpr size_t transferPacketSize = 32;
     std::array<uint8_t, transferPacketSize> cmd_pkt;
     std::array<uint8_t, transferPacketSize> rcv_pkt;
 
-    bool hardwareAttached = false;
-    bool settingsAttached = false;
+    bool spiDriverAttached   = false;
+    bool chipSelectsAttached = false;
+    bool imuSettingsAttached = false;
 
-    /* Reads sensor data */
-    void readDevice( const Chimera::Modules::IMU::Sensor_t chip );
+    void calibrateAccel();
+    void calibrateGyro();
+    void calibrateMag();
 
-    /* Resolution Calculations */
-    void calc_gRes();
-    void calc_mRes();
-    void calc_aRes();
+    void updateGyroResolution();
+    void updateMagResolution();
+    void updateAccelResolution();
 
-    /* Converts from raw data to float */
-    void calc_gyro();
-    void calc_accel();
-    void calc_mag();
+    Eigen::Matrix<float, 3, 1> convertRawAccel( const Eigen::Ref<const Eigen::Matrix<int16_t, 3, 1>> &data );
+    Eigen::Matrix<float, 3, 1> convertRawGyro( const Eigen::Matrix<int16_t, 3, 1> &data );
+    Eigen::Matrix<float, 3, 1> convertRawMag( const Eigen::Ref<const Eigen::Matrix<int16_t, 3, 1>> &data );
 
-    /* Initializes sensors */
-    void init_gyro();
-    void init_accel();
-    void init_mag();
+    void initGyro();
+    void initAccel();
+    void initMag();
 
-    /* Hardware Level Interfacing */
-    void set_CS( const Chimera::Modules::IMU::Sensor_t chip );
-    void clr_CS( const Chimera::Modules::IMU::Sensor_t chip );
-    void write_pkt( const Chimera::Modules::IMU::Sensor_t chip, uint8_t *cmd_buffer, size_t length );
-    void read_pkt( const Chimera::Modules::IMU::Sensor_t chip, uint8_t *cmd_buffer, uint8_t *rcv_buffer, size_t length );
+    void setChipSelect( const Chimera::Modules::IMU::Sensor_t chip );
+    void clearChipSelect( const Chimera::Modules::IMU::Sensor_t chip );
+    void writeCmd( const Chimera::Modules::IMU::Sensor_t chip, uint8_t *cmd_buffer, size_t length );
+    void readCmd( const Chimera::Modules::IMU::Sensor_t chip, uint8_t *cmd_buffer, uint8_t *rcv_buffer, size_t length );
 
-    /* Buffer Management */
-    void clr_cmd_pkt();
-    void clr_rcv_pkt();
+    void writeRegister( const Chimera::Modules::IMU::Sensor_t chip, const uint8_t reg, const uint8_t value );
+    uint8_t readRegister( const Chimera::Modules::IMU::Sensor_t chip, const uint8_t reg );
   };
 }    // namespace LSM9DS0
 
