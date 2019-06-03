@@ -286,9 +286,12 @@ namespace LSM9DS0
 
   static constexpr uint8_t CTRL_REG5_XM_TEMP_EN_POS = 7u;
   static constexpr uint8_t CTRL_REG5_XM_TEMP_EN     = 1u << CTRL_REG5_XM_TEMP_EN_POS;
+  
+  static constexpr uint8_t CTRL_REG5_XM_MRES_MSK = 0x60;
+  static constexpr uint8_t CTRL_REG5_XM_MRES_POS = 5u;
 
-  static constexpr uint8_t CTRL_REG5_XM_ODR_MSK = 0x07;
-  static constexpr uint8_t CTRL_REG5_XM_ODR_POS = 2u;
+  static constexpr uint8_t CTRL_REG5_XM_MODR_MSK = 0x1C;
+  static constexpr uint8_t CTRL_REG5_XM_MODR_POS = 2u;
 
   /*-------------------------------------------------
   Control Register 6 Accel/Mag
@@ -490,6 +493,21 @@ namespace LSM9DS0
     M_SM_PWR_DN
   };
 
+  enum MagnetometerResolution : uint8_t
+  {
+    M_RES_LO = 0x00, 
+    M_RES_HI = 0x03
+  };
+
+  enum MagnetometerMode : uint8_t
+  {
+    M_MODE_NORMAL0,
+    M_MODE_REF,
+    M_MODE_NORMAL1,
+    M_MODE_IT
+  };   
+   
+
 
   struct Settings
   {
@@ -539,7 +557,7 @@ namespace LSM9DS0
      *  The current calculated bias for each sensor & axis.
      *  Do not specify in setup.
      */
-    Chimera::Modules::IMU::Measurement9DOF<float> bias;
+    Chimera::Modules::IMU::Measurement9DOF<float> zeroOffset;
   };
 
 }    // namespace LSM9DS0

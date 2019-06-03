@@ -79,8 +79,34 @@ namespace LSM9DS0
     bool chipSelectsAttached = false;
     bool imuSettingsAttached = false;
 
-    void calibrateAccel();
-    void calibrateGyro();
+    /**
+     *  Performs zero offset calibration of the accelerometer. Functionally this
+     *  is accounting for slight reported offsets under zero acceleration conditions.
+     *  In order for this to work, the accelerometer must be planar in X/Y, with 1G 
+     *  perpendicular to the surface of the chip. (ie make it flat)
+     *  
+     *  After the calculations are complete, the result is the accelerometer will report
+     *  the real acceleration in each axis relative to the calibration conditions.
+     */
+    void calibrateAccelZeroOffset();
+    
+    /**
+     *  Performs zero offset calibration of the gyroscope. These sensors have a
+     *  natural static value that is reported when the system is perfectly still and
+     *  it must be subtracted from each measurement to get a close approximation of 
+     *  the true rotation rate. This requires that the system is as still as possible
+     *  while the calibration is in progress.
+     *  
+     *  After the calculations are complete, the sensor should report the rotation 
+     *  rate relative to a perfectly still system.
+     */
+    void calibrateGyroZeroOffset();
+    
+    /**
+     *  Currently this does nothing as it would require the user pointing the system
+     *  at true north, or moving the device in a sphere. Deemed unnecessary for the
+     *  moment and is simply just a placeholder for future implementations.
+     */
     void calibrateMag();
 
     void updateGyroResolution();
